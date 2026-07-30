@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible SoundStage problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove Bluetooth addresses, keys, certificate private keys, and other personal data before attaching logs.
+  - type: input
+    id: version
+    attributes:
+      label: SoundStage version
+      placeholder: v0.3.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      placeholder: Windows 11 24H2, build 26100
+    validations:
+      required: true
+  - type: input
+    id: airpods
+    attributes:
+      label: AirPods model
+      placeholder: AirPods 4 (ANC)
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Bluetooth adapter
+      placeholder: TP-Link Bluetooth 5.4 USB Adapter
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the exact mode, audio endpoint, and application involved.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Connect AirPods
+        2. Open SoundStage
+        3. Select ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Paste relevant install or diagnostic lines after removing device addresses and private data.
+      render: text

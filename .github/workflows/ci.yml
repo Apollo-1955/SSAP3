@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build application
+        run: dotnet build .\src\SoundStage.App\SoundStage.App.csproj -c Release
+
+      - name: Run managed smoke tests
+        run: >-
+          dotnet run
+          --project .\tests\SoundStage.Core.SmokeTests\SoundStage.Core.SmokeTests.csproj
+          -c Release
+
+      - name: Build spatializer
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File .\audio\build-spatializer.ps1
+
+      - name: Test spatializer
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File .\audio\test-spatializer.ps1
+
+      - name: Rebuild icons
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File .\assets\build-icons.ps1
+
+      - name: Verify generated icons are committed
+        shell: powershell
+        run: git diff --exit-code -- .\assets\SoundStage.ico .\assets\soundstage-mark.png

@@ -1,0 +1,15 @@
+* text=auto
+
+*.cmd text eol=crlf
+*.inf text eol=crlf
+*.ps1 text eol=crlf
+
+*.c text eol=lf
+*.h text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.md text eol=lf
+*.xaml text eol=lf
+
+*.chm binary
+*.exe binary
