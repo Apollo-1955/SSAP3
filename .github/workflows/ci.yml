@@ -47,6 +47,27 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass
           -File .\assets\build-icons.ps1
 
-      - name: Verify generated icons are committed
+      - name: Validate generated icons
         shell: powershell
-        run: git diff --exit-code -- .\assets\SoundStage.ico .\assets\soundstage-mark.png
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $pngPath = '.\assets\soundstage-mark.png'
+          $icoPath = '.\assets\SoundStage.ico'
+          $png = [System.Drawing.Image]::FromFile($pngPath)
+          try {
+            if ($png.Width -ne 512 -or $png.Height -ne 512) {
+              throw "Unexpected PNG dimensions: $($png.Width)x$($png.Height)"
+            }
+          }
+          finally {
+            $png.Dispose()
+          }
+          $icon = New-Object System.Drawing.Icon($icoPath)
+          try {
+            if ($icon.Width -lt 16 -or $icon.Height -lt 16) {
+              throw "The generated ICO has no usable image."
+            }
+          }
+          finally {
+            $icon.Dispose()
+          }

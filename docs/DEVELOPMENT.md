@@ -37,7 +37,7 @@ dotnet publish .\src\SoundStage.App\SoundStage.App.csproj `
 
 ## Generate brand assets
 
-The committed PNG and multi-resolution ICO are reproducible:
+The committed PNG and multi-resolution ICO can be regenerated on Windows:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -45,6 +45,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```
 
 `assets/SoundStage.svg` is the editable vector source.
+GDI+ rasterization can differ slightly between Windows builds, so CI validates
+the generated formats and dimensions instead of requiring byte-identical PNG
+and ICO output across runner images.
 
 ## Build and test the spatializer
 
