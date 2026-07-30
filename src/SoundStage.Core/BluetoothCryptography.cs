@@ -42,8 +42,8 @@ public static class BluetoothCryptography
 
     private static byte[] Encrypt(byte[] key, byte[] data)
     {
-        var swappedKey = key.Reverse().ToArray();
-        var swappedData = data.Reverse().ToArray();
+        var swappedKey = Enumerable.Reverse(key).ToArray();
+        var swappedData = Enumerable.Reverse(data).ToArray();
 
         using var aes = Aes.Create();
         aes.Key = swappedKey;
