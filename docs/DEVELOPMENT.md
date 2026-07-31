@@ -121,7 +121,15 @@ Build and run the read-only diagnostics collector:
 
 ```powershell
 dotnet run --project .\src\SoundStage.Diagnostics\SoundStage.Diagnostics.csproj `
-  -c Release -- .\artifacts\diagnostics
+  -c Release -- --output .\artifacts\diagnostics
+```
+
+To reproduce the app's targeted Apple-profile recovery from a development
+shell:
+
+```powershell
+dotnet run --project .\src\SoundStage.Diagnostics\SoundStage.Diagnostics.csproj `
+  -c Release -- --repair-control
 ```
 
 The transport probe directly exercises the user-mode driver client:
@@ -141,7 +149,7 @@ Build and verify the complete installer:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\installer\build-installer.ps1 `
-  -Version 0.3.0
+  -Version 0.4.0
 ```
 
 The script regenerates icons, builds and tests the managed core and spatializer,
@@ -154,7 +162,8 @@ Before publishing:
 1. Test first-phase install, restart, second-phase install, repair, migration,
    and uninstall on a disposable test machine.
 2. Verify the release EXE hash.
-3. Mark every test-signed build as a prerelease.
+3. State prominently that the driver is test-signed and requires Test Mode,
+   regardless of whether GitHub marks the build as a prerelease or Latest.
 
 ## Coding guidelines
 

@@ -3,7 +3,7 @@
 The public release is distributed as one `SoundStage-Setup.exe`. It contains:
 
 - the self-contained x64 SoundStage tray application;
-- the test-signed KMDF Apple AAP profile driver;
+- the test-signed KMDF Apple AAP/UARP profile driver;
 - the SoundStage binaural spatializer;
 - the required Equalizer APO runtime and corresponding source archive;
 - reversible install, migration, and uninstall scripts;
@@ -17,9 +17,13 @@ The public release is distributed as one `SoundStage-Setup.exe`. It contains:
 4. Restart Windows when requested.
 5. Run the same `SoundStage-Setup.exe` again.
 
-The second run installs the app, AAP driver, and spatial engine. Existing
+The second run installs the app, control-profile driver, and spatial engine. Existing
 endpoint effects are backed up before SoundStage is attached. Pre-SoundStage
 development builds are migrated automatically.
+
+If Windows later loses the Apple control PDO while audio remains connected,
+use **Repair** in the tray panel. **Report** creates a local diagnostic ZIP in
+`Documents\SoundStage\Reports`.
 
 ## Audio profiles
 

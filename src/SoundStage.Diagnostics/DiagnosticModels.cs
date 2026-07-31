@@ -7,7 +7,10 @@ public sealed record WindowsInfo(
     string DisplayVersion,
     int CurrentBuild,
     int UpdateBuildRevision,
-    string Architecture);
+    string Architecture,
+    uint CodeIntegrityOptions,
+    bool TestSigningActive,
+    bool? SecureBootEnabled);
 
 public sealed record BluetoothRadioInfo(
     string Name,

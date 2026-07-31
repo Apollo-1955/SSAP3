@@ -1,6 +1,6 @@
 # Installing SoundStage
 
-This guide applies to the experimental `v0.3.0` Windows prerelease.
+This guide applies to the `v0.4.0` Windows public beta.
 
 ## Read this first
 
@@ -26,7 +26,7 @@ cannot change Secure Boot for you.
 
 ## Download and verify
 
-1. Download `SoundStage-Setup.exe` from the latest GitHub prerelease.
+1. Download `SoundStage-Setup.exe` from the latest GitHub release.
 2. Optionally download `SoundStage-Setup.exe.sha256` from the same release.
 3. Verify the executable in PowerShell:
 
@@ -84,7 +84,7 @@ startup is expected.
 
 The second run:
 
-- installs the KMDF Apple AAP control-profile driver;
+- installs the KMDF Apple AAP/UARP control-profile driver;
 - verifies that the matching Bluetooth device is healthy;
 - installs SoundStage into `C:\Program Files\SoundStage`;
 - installs the spatial engine only on detected AirPods A2DP Stereo endpoints;
@@ -117,11 +117,22 @@ Hands-Free Bluetooth profile.
 Run a newer `SoundStage-Setup.exe` again. Setup is idempotent:
 
 - it only performs the preparation phase when Test Mode is not active;
+- it verifies that Test Mode remains enabled in BCD for the next restart and
+  repairs the setting when the running kernel and BCD disagree;
 - it updates the app, driver, and spatial engine after Test Mode is active;
 - it retains the independent backup of the original endpoint effects.
 
-If the package is installed but AAP is not ready, reconnect the AirPods, open
-their case, and rerun setup.
+If the package is installed but the controls are not ready, open SoundStage and
+click **Repair**. It refreshes only the paired Apple AAP/UARP services through
+the Windows Bluetooth API and waits for the driver interface. Reconnect the
+AirPods or open their case first. Rerun setup if the app reports that Test Mode
+is off or the driver package is missing.
+
+Click **Report** to create a support bundle under
+`Documents\SoundStage\Reports`. The ZIP includes the BCD/Test Mode state,
+Bluetooth devices and drivers, AAP/UARP presence, audio endpoints, Windows
+services, and SoundStage install/app logs. It is never uploaded automatically;
+review Bluetooth addresses before attaching it to a public issue.
 
 ## Uninstall
 
@@ -155,10 +166,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ### Buttons change visually but AirPods do not respond
 
 - Open the AirPods case and reconnect.
-- Run `SoundStage-Setup.exe` again.
+- Click **Repair** in SoundStage.
+- If the app reports that Test Mode is off, run `SoundStage-Setup.exe`, restart
+  when requested, and run setup once more.
 - In Device Manager → Bluetooth, confirm
-  **SoundStage Apple AAP Control Profile** has no warning icon.
+  **SoundStage Apple Control Profile** has no warning icon.
 - Review `C:\ProgramData\SoundStage\install.log`.
+- Click **Report** and attach the resulting ZIP to a private support exchange
+  or a GitHub issue after reviewing its device addresses.
 
 ### Fixed sounds the same as Off
 

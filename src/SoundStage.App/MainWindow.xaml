@@ -398,10 +398,23 @@
                                            TextTrimming="CharacterEllipsis"
                                            MaxWidth="255" />
                             </StackPanel>
-                            <Button Grid.Column="1"
-                                    Style="{StaticResource QuietButtonStyle}"
-                                    Content="Exit"
-                                    Click="ExitButton_OnClick" />
+                            <StackPanel Grid.Column="1"
+                                        Orientation="Horizontal">
+                                <Button Style="{StaticResource QuietButtonStyle}"
+                                        Content="Report"
+                                        Click="ReportButton_OnClick"
+                                        ToolTip="Create a diagnostic ZIP"
+                                        Margin="0,0,6,0" />
+                                <Button x:Name="RepairButton"
+                                        Style="{StaticResource QuietButtonStyle}"
+                                        Content="Repair"
+                                        Click="RepairButton_OnClick"
+                                        ToolTip="Restore the AirPods control profile"
+                                        Margin="0,0,6,0" />
+                                <Button Style="{StaticResource QuietButtonStyle}"
+                                        Content="Exit"
+                                        Click="ExitButton_OnClick" />
+                            </StackPanel>
                         </Grid>
                     </StackPanel>
                 </ScrollViewer>

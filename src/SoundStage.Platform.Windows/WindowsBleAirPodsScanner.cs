@@ -11,20 +11,25 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
 {
     private const ushort AppleManufacturerId = 0x004C;
     private readonly AirPodsAdvertisementParser _parser = new();
-    private readonly BluetoothLEAdvertisementWatcher _watcher;
+    private readonly object _sync = new();
+    private BluetoothLEAdvertisementWatcher _watcher;
+    private bool _disposed;
 
     public WindowsBleAirPodsScanner()
     {
-        _watcher = new BluetoothLEAdvertisementWatcher
-        {
-            ScanningMode = BluetoothLEScanningMode.Active,
-        };
-        _watcher.Received += OnAdvertisementReceived;
-        _watcher.Stopped += OnWatcherStopped;
+        _watcher = CreateWatcher(BluetoothLEScanningMode.Active);
     }
 
-    public bool IsRunning =>
-        _watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started;
+    public bool IsRunning
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started;
+            }
+        }
+    }
 
     public byte[]? IdentityResolvingKey { get; set; }
 
@@ -36,36 +41,92 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
 
     public void Start()
     {
-        if (IsRunning)
+        lock (_sync)
         {
-            return;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started)
+            {
+                return;
+            }
+
+            if (_watcher.Status is BluetoothLEAdvertisementWatcherStatus.Aborted or
+                BluetoothLEAdvertisementWatcherStatus.Stopping)
+            {
+                ReplaceWatcher(BluetoothLEScanningMode.Active, stopPrevious: false);
+            }
+
+            _watcher.Start();
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
+            {
+                ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
+                _watcher.Start();
+            }
+
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
+            {
+                throw new InvalidOperationException(
+                    "Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
+            }
         }
 
-        _watcher.Start();
-        if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
-        {
-            throw new InvalidOperationException(
-                "Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
-        }
-
-        RaiseStatus("BLE scanning started. Open the AirPods case.");
+        RaiseStatus($"BLE {_watcher.ScanningMode.ToString().ToLowerInvariant()} scanning started.");
     }
 
     public void Stop()
     {
-        if (!IsRunning)
+        lock (_sync)
         {
-            return;
+            if (_disposed ||
+                _watcher.Status != BluetoothLEAdvertisementWatcherStatus.Started)
+            {
+                return;
+            }
+
+            _watcher.Stop();
+        }
+    }
+
+    public Task RestartAsync()
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            ReplaceWatcher(BluetoothLEScanningMode.Active, stopPrevious: true);
+            _watcher.Start();
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
+            {
+                ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
+                _watcher.Start();
+            }
+
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
+            {
+                throw new InvalidOperationException(
+                    "Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
+            }
         }
 
-        _watcher.Stop();
+        RaiseStatus($"BLE {_watcher.ScanningMode.ToString().ToLowerInvariant()} scanning restarted.");
+        return Task.CompletedTask;
     }
 
     public void Dispose()
     {
-        _watcher.Received -= OnAdvertisementReceived;
-        _watcher.Stopped -= OnWatcherStopped;
-        Stop();
+        lock (_sync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _watcher.Received -= OnAdvertisementReceived;
+            _watcher.Stopped -= OnWatcherStopped;
+            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started)
+            {
+                _watcher.Stop();
+            }
+        }
     }
 
     private void OnAdvertisementReceived(
@@ -105,6 +166,11 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
         BluetoothLEAdvertisementWatcher sender,
         BluetoothLEAdvertisementWatcherStoppedEventArgs args)
     {
+        if (TryStartPassiveFallback(sender, args.Error))
+        {
+            return;
+        }
+
         RaiseStatus(args.Error switch
         {
             BluetoothError.Success => "BLE scanning stopped.",
@@ -116,6 +182,60 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
             BluetoothError.ResourceInUse => "The Bluetooth adapter is busy.",
             _ => $"BLE stopped: {args.Error}",
         });
+    }
+
+    private bool TryStartPassiveFallback(
+        BluetoothLEAdvertisementWatcher sender,
+        BluetoothError error)
+    {
+        if (error is not (BluetoothError.NotSupported or BluetoothError.ResourceInUse))
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            if (_disposed ||
+                !ReferenceEquals(sender, _watcher) ||
+                sender.ScanningMode != BluetoothLEScanningMode.Active)
+            {
+                return false;
+            }
+
+            ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
+            _watcher.Start();
+        }
+
+        RaiseStatus("Active BLE scanning was unavailable; passive fallback started.");
+        return true;
+    }
+
+    private BluetoothLEAdvertisementWatcher CreateWatcher(
+        BluetoothLEScanningMode mode)
+    {
+        var watcher = new BluetoothLEAdvertisementWatcher
+        {
+            ScanningMode = mode,
+        };
+        watcher.Received += OnAdvertisementReceived;
+        watcher.Stopped += OnWatcherStopped;
+        return watcher;
+    }
+
+    private void ReplaceWatcher(
+        BluetoothLEScanningMode mode,
+        bool stopPrevious)
+    {
+        var previous = _watcher;
+        previous.Received -= OnAdvertisementReceived;
+        previous.Stopped -= OnWatcherStopped;
+        if (stopPrevious &&
+            previous.Status == BluetoothLEAdvertisementWatcherStatus.Started)
+        {
+            previous.Stop();
+        }
+
+        _watcher = CreateWatcher(mode);
     }
 
     private void RaiseStatus(string message)
