@@ -697,7 +697,7 @@ function Write-HardwareStatus {
     $allHealthy = $true
     foreach ($device in @($devices)) {
         Write-InstallLog (
-            'AAP device: Status={0}; Class={1}; InstanceId={2}' `
+            'Apple control device: Status={0}; Class={1}; InstanceId={2}' `
                 -f $device.Status, $device.Class, $device.InstanceId)
         if ([string]$device.Status -ne 'OK') {
             $allHealthy = $false
@@ -812,13 +812,13 @@ New-Item -ItemType Directory -Force -Path $programDataDirectory | Out-Null
 try {
     $testSigningActive = Test-TestSigningActive
     $testSigningConfigured = Test-TestSigningConfigured
-    Write-InstallLog (
-        'Code Integrity options: 0x{0:X8}; TestSigningActive={1}; ' +
-        'TestSigningConfigured={2}.' `
-            -f `
-                (Get-CodeIntegrityOptions), `
-                $testSigningActive, `
-                $testSigningConfigured)
+    $codeIntegrityMessage =
+        ('Code Integrity options: 0x{0:X8}; TestSigningActive={1}; ' +
+         'TestSigningConfigured={2}.') -f `
+            (Get-CodeIntegrityOptions), `
+            $testSigningActive, `
+            $testSigningConfigured
+    Write-InstallLog $codeIntegrityMessage
 
     if ($testSigningActive) {
         Enable-PersistentTestSigning
