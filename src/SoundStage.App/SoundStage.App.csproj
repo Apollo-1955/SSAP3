@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\SoundStage.Core\SoundStage.Core.csproj" />
+    <ProjectReference Include="..\SoundStage.Diagnostics\SoundStage.Diagnostics.csproj" />
     <ProjectReference Include="..\SoundStage.Platform.Windows\SoundStage.Platform.Windows.csproj" />
   </ItemGroup>
   <PropertyGroup>
@@ -9,9 +10,9 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>SoundStage</AssemblyName>
-    <Version>0.3.0</Version>
-    <FileVersion>0.3.0.0</FileVersion>
-    <AssemblyVersion>0.3.0.0</AssemblyVersion>
+    <Version>0.4.0</Version>
+    <FileVersion>0.4.0.0</FileVersion>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
     <Product>SoundStage</Product>
     <Authors>OpenAI Codex</Authors>
     <Description>AirPods control center for Windows 10 and Windows 11</Description>

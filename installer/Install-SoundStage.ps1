@@ -32,6 +32,7 @@ $legacyInstallDirectory =
 $legacyCatalogFileName =
     ('{0}-airpods4-anc.cat' -f $legacyProductName.ToLowerInvariant())
 $targetHardwareIdPatterns = @(
+    'BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}*',
     'BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}*'
 )
 
@@ -128,6 +129,40 @@ namespace SoundStage
 
 function Test-TestSigningActive {
     return ((Get-CodeIntegrityOptions) -band 0x2) -ne 0
+}
+
+function Test-TestSigningConfigured {
+    $output = & (Join-Path $env:SystemRoot 'System32\bcdedit.exe') `
+        /enum '{current}' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to read the current Windows boot configuration.'
+    }
+
+    $line = $output |
+        Where-Object { [string]$_ -match '(?i)^\s*testsigning\s+' } |
+        Select-Object -First 1
+    if ($null -eq $line) {
+        return $false
+    }
+
+    $value = (([string]$line).Trim() -split '\s+')[-1]
+    return $value -match '(?i)^(yes|on|true|да|вкл\.?|включено)$'
+}
+
+function Enable-PersistentTestSigning {
+    if (Test-TestSigningConfigured) {
+        return
+    }
+
+    Write-InstallLog (
+        'Test Mode is active in the running kernel but disabled for the next boot. ' +
+        'Repairing the persistent BCD setting.')
+    Invoke-NativeCommand `
+        -FilePath (Join-Path $env:SystemRoot 'System32\bcdedit.exe') `
+        -Arguments @('/set', 'testsigning', 'on') | Out-Null
+    if (-not (Test-TestSigningConfigured)) {
+        throw 'Windows accepted the Test Mode command, but BCD still reports it as disabled.'
+    }
 }
 
 function Get-PackageCertificate {
@@ -499,6 +534,9 @@ function Invoke-PreparePhase {
     Invoke-NativeCommand `
         -FilePath (Join-Path $env:SystemRoot 'System32\bcdedit.exe') `
         -Arguments @('/set', 'testsigning', 'on') | Out-Null
+    if (-not (Test-TestSigningConfigured)) {
+        throw 'Windows did not persist the Test Mode boot setting.'
+    }
 
     Set-Content `
         -LiteralPath $restartMarkerPath `
@@ -629,7 +667,7 @@ function Install-Application {
 }
 
 function Invoke-DriverInstall {
-    Write-InstallLog 'Installing the SoundStage AAP profile driver.'
+    Write-InstallLog 'Installing the SoundStage AAP/UARP profile driver.'
     Invoke-NativeCommand `
         -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') `
         -Arguments @('/add-driver', $infPath, '/install') `
@@ -684,6 +722,7 @@ function Invoke-InstallPhase {
         throw (
             'Windows Test Mode is not active yet. Restart Windows and run this installer again.')
     }
+    Enable-PersistentTestSigning
 
     $legacyState = Invoke-LegacyMigration
     $state = Get-ExistingState
@@ -772,11 +811,17 @@ New-Item -ItemType Directory -Force -Path $programDataDirectory | Out-Null
 
 try {
     $testSigningActive = Test-TestSigningActive
+    $testSigningConfigured = Test-TestSigningConfigured
     Write-InstallLog (
-        'Code Integrity options: 0x{0:X8}; TestSigningActive={1}.' `
-            -f (Get-CodeIntegrityOptions), $testSigningActive)
+        'Code Integrity options: 0x{0:X8}; TestSigningActive={1}; ' +
+        'TestSigningConfigured={2}.' `
+            -f `
+                (Get-CodeIntegrityOptions), `
+                $testSigningActive, `
+                $testSigningConfigured)
 
     if ($testSigningActive) {
+        Enable-PersistentTestSigning
         Invoke-InstallPhase
     }
     else {

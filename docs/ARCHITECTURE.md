@@ -10,10 +10,10 @@ independently.
 | --- | --- |
 | `SoundStage.App` | WPF tray panel, user settings, mode state, animations, lifecycle |
 | `SoundStage.Core` | AAP packets, BLE/AAP parsers, crypto helpers, profile policy |
-| `SoundStage.Platform.Windows` | BLE watcher, remembered-device discovery, audio endpoint control, driver client |
-| `SoundStageKmdf` | Apple AAP Bluetooth profile binding and bounded packet transport |
+| `SoundStage.Platform.Windows` | BLE watcher, remembered-device discovery, AAP/UARP service repair, audio endpoint control, driver client |
+| `SoundStageKmdf` | Apple AAP/UARP Bluetooth profile binding and bounded packet transport |
 | `SoundStageSpatializer` | Real-time stereo-to-binaural rendering |
-| `SoundStage.Diagnostics` | Read-only Windows/Bluetooth/audio reports |
+| `SoundStage.Diagnostics` | Windows/Bluetooth/audio reports and an explicit profile-repair command |
 | `SoundStage.TransportProbe` | Low-level AAP transport diagnostics |
 | `installer` | Two-stage install, endpoint-effect chaining, and reversible uninstall |
 
@@ -29,15 +29,23 @@ independently.
    `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE`.
 6. AACP packets are sent and received through bounded 512-byte IOCTL buffers.
 
+If step 2 finds no interface, the app verifies the running Code Integrity/Test
+Mode state. With Test Mode active, it asks Windows to refresh the paired
+AirPods AAP and UARP services using `BluetoothSetServiceState`, then retries
+interface discovery. This addresses stacks that keep A2DP connected but lose
+the Apple control PDO after reconnect.
+
 The driver owns sessions per file object. Cleanup closes every session
 belonging to a terminated client, so a crashed UI does not intentionally leave
 an orphaned AAP channel.
 
 ### Driver scope
 
-The INF binds to:
+The INF binds to either of these Apple service PDOs:
 
 `BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}...`
+
+`BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}...`
 
 Known Apple product IDs are listed explicitly, followed by profile-level
 fallback IDs. The driver does not replace:
@@ -47,9 +55,11 @@ fallback IDs. The driver does not replace:
 - A2DP/AVDTP audio;
 - Hands-Free/HFP;
 - AVRCP media controls;
-- Find My/UARPS.
+- unrelated vendor or Apple services.
 
-This narrow binding is important for safe removal and adapter portability.
+The UARP binding is a fallback parent for the same fixed AACP L2CAP PSM; the
+driver does not implement firmware updates. This narrow service-level binding
+is important for safe removal and adapter portability.
 
 ## AAP and AACP
 
@@ -165,6 +175,8 @@ Test Mode configuration the user already had.
 - A named mutex enforces one SoundStage UI instance.
 - A named event asks the existing instance to reveal itself.
 - Tray events are marshaled onto the WPF dispatcher.
+- A four-second timer reconciles the classic paired-device state and retries a
+  missing control path with throttling.
 - A cancellation token owns the motion read loop.
 - A semaphore serializes driver-channel operations.
 - The spatializer reads shared state without calling managed code or allocating

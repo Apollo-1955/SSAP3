@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-5965F2"></a>
   <img alt="Windows 10 and 11 x64" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
-  <img alt="Experimental release" src="https://img.shields.io/badge/status-experimental-F5A524">
+  <img alt="Public beta" src="https://img.shields.io/badge/status-public%20beta-F5A524">
 </p>
 
 > [!WARNING]
@@ -37,14 +37,14 @@ the Windows A2DP Stereo path for high-quality playback.
 | Status | AirPods model, connection state, in-ear state, and active audio profile |
 | Windows integration | Animated tray panel, single-instance behavior, autostart, desktop/Start menu shortcuts |
 | Audio guidance | Detects and explains the A2DP-versus-Hands-Free microphone limitation |
-| Recovery | Reversible driver, audio-effect, certificate, shortcut, and Test Mode uninstall |
+| Recovery | Automatic AAP/UARP profile repair plus reversible driver, audio-effect, certificate, shortcut, and Test Mode uninstall |
+| Diagnostics | One-click ZIP with Windows, Bluetooth, audio-route, driver, BCD, installer, and app state |
 
 The interface is English so one build can be used internationally.
 
 ## Quick install
 
-1. Download the single `SoundStage-Setup.exe` from the latest GitHub
-   prerelease.
+1. Download the single `SoundStage-Setup.exe` from the latest GitHub release.
 2. Pair the AirPods in Windows and connect them.
 3. Disable Secure Boot in UEFI/BIOS.
 4. Run `SoundStage-Setup.exe` and approve the administrator prompt.
@@ -92,9 +92,17 @@ AirPods 4 (ANC).
 
 SoundStage listens for Apple Bluetooth LE manufacturer advertisements and AAP
 notifications. It decodes model, left/right/case battery, charging state,
-in-ear flags, and connection state. Case battery is shown only when the
-AirPods advertise a valid case value; the most recent valid value is retained
-when a transient packet reports an unavailable placeholder.
+in-ear flags, and connection state. Active BLE scanning automatically falls
+back to passive scanning when an adapter or vendor filter rejects active mode.
+Case battery is shown only when the AirPods advertise a valid case value; the
+most recent valid value is retained when a transient packet reports an
+unavailable placeholder.
+
+Connection status comes from the classic paired-device state, not from a
+randomized BLE address. If Windows drops the Apple control-profile device after
+a reconnect, SoundStage can refresh the paired AAP/UARP services and wait for
+the driver interface to return. The **Repair** button runs this explicitly;
+**Report** creates a diagnostic ZIP under `Documents\SoundStage\Reports`.
 
 ## Architecture
 
@@ -104,8 +112,8 @@ flowchart LR
     UI --> BLE["Windows BLE scanner"]
     UI --> Client["User-mode driver client"]
     Client --> IOCTL["Versioned IOCTL bridge"]
-    IOCTL --> KMDF["KMDF Apple AAP profile driver"]
-    KMDF --> AAP["AirPods AAP L2CAP channel"]
+    IOCTL --> KMDF["KMDF Apple AAP/UARP profile driver"]
+    KMDF --> AAP["AirPods AACP L2CAP channel"]
     BLE --> Adv["Battery and in-ear advertisements"]
     AAP --> Controls["Noise-control commands"]
     AAP --> Motion["IMU and battery notifications"]
@@ -116,10 +124,12 @@ flowchart LR
     DSP --> AirPods["AirPods Stereo endpoint"]
 ```
 
-The driver binds only to Apple's AAP profile UUID
-`74ec2172-0bad-4d01-8f77-997b2be0722a`. It deliberately does not claim the
-Bluetooth adapter, A2DP audio, Hands-Free, AVRCP, Find My/UARPS, or unrelated
-Bluetooth services.
+The driver binds to Apple's AAP profile UUID
+`74ec2172-0bad-4d01-8f77-997b2be0722a` and, as a reconnect fallback, the Apple
+UARP service UUID `4715650b-5e9d-4ac2-b898-a4fc0aa5df78`. Either profile PDO
+provides the same bounded path to the known AACP PSM. It deliberately does not
+replace the Bluetooth adapter, Microsoft enumerators, A2DP audio, Hands-Free,
+AVRCP, or unrelated Bluetooth services.
 
 For component boundaries, transport details, DSP behavior, and recovery
 design, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -133,8 +143,10 @@ design, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   IDs for AirPods, AirPods Pro, and AirPods Max.
 
 The current build was validated on Windows 10 22H2 build 19045 with AirPods 4
-(ANC) and a TP-Link Bluetooth 5.4 USB adapter. Other combinations need community
-testing.
+(ANC) and a TP-Link Bluetooth 5.4 USB adapter. Compatibility diagnostics and
+the lost-profile recovery path were also developed from a Windows 11 26H1
+system using a BARROT Bluetooth 5.4 adapter. Other combinations still need
+community testing.
 
 ## Discord, games, and microphone quality
 
@@ -159,6 +171,7 @@ remove.
   `C:\ProgramData\SoundStage\head-tracking-state.bin`.
 - The installer records reversible state and logs in
   `C:\ProgramData\SoundStage`.
+- Diagnostic ZIPs are created only on demand and never uploaded automatically.
 - The driver exposes a narrow, versioned packet bridge rather than arbitrary
   kernel memory or device access.
 
@@ -177,7 +190,8 @@ Project layout:
 - `src/SoundStage.App` — WPF tray application;
 - `src/SoundStage.Core` — AAP packets, parsers, and state models;
 - `src/SoundStage.Platform.Windows` — BLE, Windows audio, and driver client;
-- `driver/SoundStageKmdf` — KMDF Apple AAP profile driver;
+- `src/SoundStage.Diagnostics` — one-click and command-line support reports;
+- `driver/SoundStageKmdf` — KMDF Apple AAP/UARP profile driver;
 - `audio/SoundStageSpatializer` — real-time binaural VST processor;
 - `tests/SoundStage.Core.SmokeTests` — protocol and parser smoke tests;
 - `installer` — reproducible single-EXE, two-stage Windows installer;
@@ -191,8 +205,8 @@ Project layout:
 - ASIO and WASAPI exclusive-mode streams can bypass system audio effects.
 - Battery availability depends on packets currently advertised by the
   AirPods.
-- Bluetooth reconnect quality still depends partly on the adapter, its USB
-  placement, radio interference, and the Windows Bluetooth stack.
+- Automatic AAP/UARP repair cannot fix a disabled radio, a vendor driver that
+  does not expose Apple SDP services, or severe radio interference.
 
 ## License and credits
 

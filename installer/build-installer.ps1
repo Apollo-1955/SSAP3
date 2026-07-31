@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.3.0',
+    [string]$Version = '0.4.0',
     [switch]$SkipTests
 )
 
@@ -59,11 +59,24 @@ function Invoke-Checked {
 }
 
 $dotnetCommand = Get-Command dotnet.exe -ErrorAction SilentlyContinue
-$dotnet = if ($null -ne $dotnetCommand) {
-    $dotnetCommand.Source
+$dotnetCandidates = @(
+    (Join-Path $workspaceRoot '.dotnet\dotnet.exe'),
+    $(if ($null -ne $dotnetCommand) { $dotnetCommand.Source })
+) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+$dotnet = $null
+foreach ($candidate in $dotnetCandidates) {
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+        continue
+    }
+
+    $installedSdks = & $candidate --list-sdks 2>$null
+    if ($LASTEXITCODE -eq 0 -and @($installedSdks).Count -gt 0) {
+        $dotnet = $candidate
+        break
+    }
 }
-else {
-    Join-Path $workspaceRoot '.dotnet\dotnet.exe'
+if ([string]::IsNullOrWhiteSpace($dotnet)) {
+    throw 'A .NET 8 SDK host was not found.'
 }
 
 foreach ($requiredPath in @(

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -7,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using SoundStage.Core;
+using SoundStage.Diagnostics;
 using SoundStage.Platform.Windows;
 using Brush = System.Windows.Media.Brush;
 using Brushes = System.Windows.Media.Brushes;
@@ -27,6 +29,7 @@ public partial class MainWindow : Window
     private readonly AirPodsBatteryPacketParser _batteryPacketParser = new();
     private readonly SoundStageUserSettings _settings = SoundStageUserSettings.Load();
     private readonly WinForms.NotifyIcon _trayIcon;
+    private readonly DispatcherTimer _connectionTimer;
 
     private SoundStageDriverAacpClient? _driverClient;
     private CancellationTokenSource? _motionCancellation;
@@ -42,17 +45,29 @@ public partial class MainWindow : Window
     private float _trackingCenterPitch;
     private int _trackingCenterSamples;
     private DateTime _ignoreDeactivationUntil;
+    private DateTime _lastControlRepairAttempt;
+    private DateTime _lastAdvertisementReceived;
+    private bool _airPodsClassicConnected;
+    private bool _repairInProgress;
+    private bool _connectionRefreshInProgress;
+    private bool _motionReaderRunning;
 
     public MainWindow()
     {
         InitializeComponent();
         _trayIcon = CreateTrayIcon();
+        _connectionTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(4),
+        };
+        _connectionTimer.Tick += ConnectionTimer_OnTick;
         _scanner.AdvertisementReceived += Scanner_OnAdvertisementReceived;
         _scanner.StatusChanged += Scanner_OnStatusChanged;
         Loaded += MainWindow_OnLoaded;
         Closing += MainWindow_OnClosing;
         Closed += MainWindow_OnClosed;
         Deactivated += MainWindow_OnDeactivated;
+        SoundStageAppLog.Write("SoundStage 0.4.0 process started.");
     }
 
     public void ShowFromTray()
@@ -107,6 +122,8 @@ public partial class MainWindow : Window
         StartScanner();
         _uiReady = true;
         AnimateIn();
+        _connectionTimer.Start();
+        await RepairControlPathAsync(force: false);
         await RefreshSpatialStatusAsync();
     }
 
@@ -125,6 +142,8 @@ public partial class MainWindow : Window
     {
         _motionCancellation?.Cancel();
         _motionCancellation?.Dispose();
+        _connectionTimer.Stop();
+        _connectionTimer.Tick -= ConnectionTimer_OnTick;
         _scanner.AdvertisementReceived -= Scanner_OnAdvertisementReceived;
         _scanner.StatusChanged -= Scanner_OnStatusChanged;
         _scanner.Dispose();
@@ -132,6 +151,7 @@ public partial class MainWindow : Window
         _headTrackingAudioState.Dispose();
         _driverGate.Dispose();
         _trayIcon.Dispose();
+        SoundStageAppLog.Write("SoundStage process stopped.");
     }
 
     private async void MainWindow_OnDeactivated(object? sender, EventArgs e)
@@ -163,11 +183,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RefreshButton_OnClick(object sender, RoutedEventArgs e)
+    private async void RefreshButton_OnClick(object sender, RoutedEventArgs e)
     {
         LoadRememberedAirPods();
-        _scanner.Stop();
-        StartScanner();
+        await _scanner.RestartAsync();
+        await RepairControlPathAsync(force: true);
         _ = RefreshSpatialStatusAsync();
         AnimateRefreshButton();
     }
@@ -177,6 +197,46 @@ public partial class MainWindow : Window
 
     private void ExitButton_OnClick(object sender, RoutedEventArgs e) =>
         ((App)System.Windows.Application.Current).ExitApplication();
+
+    private async void RepairButton_OnClick(object sender, RoutedEventArgs e) =>
+        await RepairControlPathAsync(force: true);
+
+    private async void ReportButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        var reportButton = sender as System.Windows.Controls.Button;
+        if (reportButton is not null)
+        {
+            reportButton.IsEnabled = false;
+        }
+
+        StatusLog.Text = "Collecting diagnostics…";
+        try
+        {
+            var result = await SoundStageDiagnosticCollector.CollectAsync();
+            StatusLog.Text = result.Complete
+                ? "Diagnostic ZIP created"
+                : "Diagnostic ZIP created with warnings";
+            SoundStageAppLog.Write($"Diagnostic bundle created: {result.ZipPath}");
+            _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{result.ZipPath}\"",
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception exception)
+        {
+            StatusLog.Text = $"Report failed: {Shorten(exception.Message, 45)}";
+            SoundStageAppLog.Write($"Diagnostic collection failed: {exception}");
+        }
+        finally
+        {
+            if (reportButton is not null)
+            {
+                reportButton.IsEnabled = true;
+            }
+        }
+    }
 
     private async void NoiseModeRadio_OnChecked(object sender, RoutedEventArgs e)
     {
@@ -427,115 +487,127 @@ public partial class MainWindow : Window
 
     private async Task ReadMotionLoopAsync(CancellationToken cancellationToken)
     {
+        _motionReaderRunning = true;
         var started = DateTime.UtcNow;
         var triedFallbackPacket = false;
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            byte[] packet;
-            try
+            while (!cancellationToken.IsCancellationRequested)
             {
-                await _driverGate.WaitAsync(cancellationToken);
+                byte[] packet;
                 try
                 {
-                    packet = _driverClient?.Receive() ?? [];
+                    await _driverGate.WaitAsync(cancellationToken);
+                    try
+                    {
+                        packet = _driverClient?.Receive() ?? [];
+                    }
+                    finally
+                    {
+                        _driverGate.Release();
+                    }
                 }
-                finally
+                catch (OperationCanceledException)
                 {
-                    _driverGate.Release();
+                    return;
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception exception)
-            {
-                await Dispatcher.InvokeAsync(() =>
+                catch (Exception exception)
                 {
-                    MotionBadge.Text = "IMU ×";
-                    SpatialStatusText.Text =
-                        $"Fixed HRTF active · sensor: {Shorten(exception.Message, 40)}";
-                });
-                return;
-            }
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        MotionBadge.Text = "IMU ×";
+                        SpatialStatusText.Text =
+                            $"Fixed HRTF active · sensor: {Shorten(exception.Message, 40)}";
+                    });
+                    return;
+                }
 
-            if (_headTrackingParser.TryParse(packet, out var frame))
-            {
-                const int centerSampleCount = 12;
-                if (_trackingCenterSamples < centerSampleCount)
+                if (_headTrackingParser.TryParse(packet, out var frame))
                 {
-                    _trackingCenterSamples++;
-                    _trackingCenterYaw += WrapDegrees(
-                        frame.Yaw - _trackingCenterYaw) /
-                        _trackingCenterSamples;
-                    _trackingCenterPitch +=
-                        (frame.Pitch - _trackingCenterPitch) /
-                        _trackingCenterSamples;
-                    _smoothedYaw = 0;
-                    _smoothedPitch = 0;
+                    const int centerSampleCount = 12;
+                    if (_trackingCenterSamples < centerSampleCount)
+                    {
+                        _trackingCenterSamples++;
+                        _trackingCenterYaw += WrapDegrees(
+                            frame.Yaw - _trackingCenterYaw) /
+                            _trackingCenterSamples;
+                        _trackingCenterPitch +=
+                            (frame.Pitch - _trackingCenterPitch) /
+                            _trackingCenterSamples;
+                        _smoothedYaw = 0;
+                        _smoothedPitch = 0;
+                    }
+                    else
+                    {
+                        var centeredYaw = WrapDegrees(
+                            frame.Yaw - _trackingCenterYaw);
+                        var centeredPitch =
+                            frame.Pitch - _trackingCenterPitch;
+                        var yawDelta = WrapDegrees(
+                            centeredYaw - _smoothedYaw);
+                        var pitchDelta = centeredPitch - _smoothedPitch;
+                        var yawSmoothing = Math.Clamp(
+                            0.12f + Math.Abs(yawDelta) * 0.018f,
+                            0.12f,
+                            0.42f);
+                        var pitchSmoothing = Math.Clamp(
+                            0.11f + Math.Abs(pitchDelta) * 0.016f,
+                            0.11f,
+                            0.34f);
+                        _smoothedYaw += yawDelta * yawSmoothing;
+                        _smoothedPitch += pitchDelta * pitchSmoothing;
+                    }
+                    _headTrackingAudioState.UpdateMotion(
+                        _smoothedYaw,
+                        _smoothedPitch);
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        MotionBadge.Text = "LIVE";
+                        SpatialStatusText.Text = "Head tracking active";
+                        SpatialStatusText.Foreground =
+                            (Brush)FindResource("SuccessBrush");
+                    });
                 }
-                else
+                else if (_batteryPacketParser.TryParse(packet, out var battery) &&
+                         battery is not null)
                 {
-                    var centeredYaw = WrapDegrees(
-                        frame.Yaw - _trackingCenterYaw);
-                    var centeredPitch =
-                        frame.Pitch - _trackingCenterPitch;
-                    var yawDelta = WrapDegrees(
-                        centeredYaw - _smoothedYaw);
-                    var pitchDelta = centeredPitch - _smoothedPitch;
-                    var yawSmoothing = Math.Clamp(
-                        0.12f + Math.Abs(yawDelta) * 0.018f,
-                        0.12f,
-                        0.42f);
-                    var pitchSmoothing = Math.Clamp(
-                        0.11f + Math.Abs(pitchDelta) * 0.016f,
-                        0.11f,
-                        0.34f);
-                    _smoothedYaw += yawDelta * yawSmoothing;
-                    _smoothedPitch += pitchDelta * pitchSmoothing;
+                    await Dispatcher.InvokeAsync(() => ApplyBatteryUpdate(battery));
                 }
-                _headTrackingAudioState.UpdateMotion(
-                    _smoothedYaw,
-                    _smoothedPitch);
-                await Dispatcher.InvokeAsync(() =>
+                else if (!triedFallbackPacket &&
+                         DateTime.UtcNow - started > TimeSpan.FromSeconds(2))
                 {
-                    MotionBadge.Text = "LIVE";
-                    SpatialStatusText.Text = "Head tracking active";
-                    SpatialStatusText.Foreground =
-                        (Brush)FindResource("SuccessBrush");
-                });
-            }
-            else if (_batteryPacketParser.TryParse(packet, out var battery) &&
-                     battery is not null)
-            {
-                await Dispatcher.InvokeAsync(() => ApplyBatteryUpdate(battery));
-            }
-            else if (!triedFallbackPacket &&
-                     DateTime.UtcNow - started > TimeSpan.FromSeconds(2))
-            {
-                triedFallbackPacket = true;
-                try
-                {
-                    await SendAacpPacketAsync(
-                        AacpPacketFactory.CreateStartHeadTracking());
+                    triedFallbackPacket = true;
+                    try
+                    {
+                        await SendAacpPacketAsync(
+                            AacpPacketFactory.CreateStartHeadTracking());
+                    }
+                    catch
+                    {
+                        // The primary packet is only a compatibility fallback.
+                    }
                 }
-                catch
+                else if (DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
                 {
-                    // The primary packet is only a compatibility fallback.
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        MotionBadge.Text = "HRTF";
+                        SpatialStatusText.Text =
+                            "Fixed HRTF active · waiting for AirPods motion";
+                        SpatialStatusText.Foreground = Brushes.Orange;
+                    });
                 }
-            }
-            else if (DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
-            {
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    MotionBadge.Text = "HRTF";
-                    SpatialStatusText.Text =
-                        "Fixed HRTF active · waiting for AirPods motion";
-                    SpatialStatusText.Foreground = Brushes.Orange;
-                });
-            }
 
-            await Task.Delay(18, cancellationToken);
+                await Task.Delay(18, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Mode changes and shutdown cancel the optional sensor stream.
+        }
+        finally
+        {
+            _motionReaderRunning = false;
         }
     }
 
@@ -553,32 +625,167 @@ public partial class MainWindow : Window
         await _driverGate.WaitAsync();
         try
         {
-            if (_driverClient is null)
-            {
-                var connection = SoundStageDriverAacpClient.TryConnect(address);
-                if (!connection.Connected || connection.Client is null)
-                {
-                    connection.Dispose();
-                    throw new IOException(connection.Message);
-                }
-
-                _driverClient = connection.Client;
-                _aacpInitialized = false;
-            }
-
-            if (!_aacpInitialized)
-            {
-                _driverClient.Send(AacpPacketFactory.CreateHandshake());
-                _driverClient.Send(AacpPacketFactory.CreateFeatureFlags());
-                _driverClient.Send(AacpPacketFactory.CreateNotificationRequest());
-                _aacpInitialized = true;
-            }
-
-            _driverClient.Send(packet);
+            await EnsureAacpConnectionLockedAsync(address, allowRepair: true);
+            var client = _driverClient ??
+                throw new InvalidOperationException(
+                    "The SoundStage control driver did not become available.");
+            client.Send(packet);
         }
         finally
         {
             _driverGate.Release();
+        }
+    }
+
+    private async Task EnsureAacpConnectionLockedAsync(
+        string address,
+        bool allowRepair)
+    {
+        if (_driverClient is null)
+        {
+            var connection = SoundStageDriverAacpClient.TryConnect(address);
+            var firstError = connection.Message;
+            if (connection.Connected && connection.Client is not null)
+            {
+                _driverClient = connection.Client;
+            }
+            else
+            {
+                connection.Dispose();
+                if (!allowRepair)
+                {
+                    throw new IOException(firstError);
+                }
+
+                bool testSigningActive;
+                try
+                {
+                    testSigningActive = WindowsCodeIntegrity.IsTestSigningActive;
+                }
+                catch (Exception exception)
+                {
+                    SoundStageAppLog.Write(
+                        $"Code Integrity query failed before AAP repair: {exception.Message}");
+                    testSigningActive = true;
+                }
+
+                if (!testSigningActive)
+                {
+                    throw new IOException(
+                        "SoundStage driver is blocked because Windows Test Mode is off. " +
+                        "Run SoundStage Setup repair and restart Windows.");
+                }
+
+                var repair = await Task.Run(() =>
+                    WindowsAirPodsServiceManager.EnsureControlProfilesEnabled(
+                        forceRebind: true));
+                SoundStageAppLog.Write(
+                    $"AAP repair: found={repair.AirPodsFound}; " +
+                    $"connected={repair.Connected}; changed={repair.Changed}; " +
+                    $"enabled={repair.AnyProfileEnabled}; {repair.Message}");
+                if (!string.IsNullOrWhiteSpace(repair.Address))
+                {
+                    address = repair.Address;
+                    _airPodsAddress = repair.Address;
+                    DeviceAddress.Text = repair.Address;
+                }
+
+                if (!repair.AnyProfileEnabled)
+                {
+                    throw new IOException(repair.Message);
+                }
+
+                for (var attempt = 0; attempt < 12; attempt++)
+                {
+                    await Task.Delay(attempt == 0 ? 250 : 400);
+                    connection = SoundStageDriverAacpClient.TryConnect(address);
+                    if (connection.Connected && connection.Client is not null)
+                    {
+                        _driverClient = connection.Client;
+                        break;
+                    }
+
+                    firstError = connection.Message;
+                    connection.Dispose();
+                }
+
+                if (_driverClient is null)
+                {
+                    throw new IOException(
+                        $"{repair.Message} Driver interface did not return: {firstError}");
+                }
+            }
+
+            _aacpInitialized = false;
+        }
+
+        if (!_aacpInitialized)
+        {
+            _driverClient.Send(AacpPacketFactory.CreateHandshake());
+            _driverClient.Send(AacpPacketFactory.CreateFeatureFlags());
+            _driverClient.Send(AacpPacketFactory.CreateNotificationRequest());
+            _aacpInitialized = true;
+            SoundStageAppLog.Write("AACP session initialized.");
+        }
+    }
+
+    private async Task RepairControlPathAsync(bool force)
+    {
+        if (_repairInProgress ||
+            (!force &&
+             DateTime.UtcNow - _lastControlRepairAttempt < TimeSpan.FromSeconds(12)))
+        {
+            return;
+        }
+
+        _repairInProgress = true;
+        _lastControlRepairAttempt = DateTime.UtcNow;
+        RepairButton.IsEnabled = false;
+        try
+        {
+            LoadRememberedAirPods();
+            if (string.IsNullOrWhiteSpace(_airPodsAddress))
+            {
+                StatusLog.Text = "Pair AirPods in Windows first";
+                return;
+            }
+
+            StatusLog.Text = force
+                ? "Repairing the AirPods control profile…"
+                : "Checking the AirPods control profile…";
+            await _driverGate.WaitAsync();
+            try
+            {
+                await EnsureAacpConnectionLockedAsync(
+                    _airPodsAddress,
+                    allowRepair: true);
+            }
+            finally
+            {
+                _driverGate.Release();
+            }
+
+            NoiseStatusText.Text = "AAP ready";
+            NoiseStatusText.Foreground = (Brush)FindResource("SuccessBrush");
+            StatusLog.Text = "AirPods control profile ready";
+            SoundStageAppLog.Write("Control path health check passed.");
+            if (SpatialTrackedRadio.IsChecked == true && !_motionReaderRunning)
+            {
+                await StartMotionTrackingAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            ResetAacpConnection();
+            NoiseStatusText.Text = "Not connected";
+            NoiseStatusText.Foreground = Brushes.Orange;
+            StatusLog.Text = Shorten(exception.Message, 66);
+            SoundStageAppLog.Write($"Control path repair failed: {exception}");
+        }
+        finally
+        {
+            RepairButton.IsEnabled = true;
+            _repairInProgress = false;
         }
     }
 
@@ -594,14 +801,18 @@ public partial class MainWindow : Window
         try
         {
             _scanner.Start();
-            ConnectionBadge.Text = "Scanning AirPods over BLE…";
-            ConnectionDot.Fill = Brushes.Gold;
+            if (!_airPodsClassicConnected)
+            {
+                ConnectionBadge.Text = "Scanning AirPods over BLE…";
+                ConnectionDot.Fill = Brushes.Gold;
+            }
         }
         catch (Exception exception)
         {
             ConnectionBadge.Text = "Bluetooth unavailable";
             ConnectionDot.Fill = Brushes.OrangeRed;
             StatusLog.Text = Shorten(exception.Message, 62);
+            SoundStageAppLog.Write($"BLE scanner failed to start: {exception}");
         }
     }
 
@@ -612,18 +823,23 @@ public partial class MainWindow : Window
             var remembered = WindowsRememberedAirPodsFinder.FindBest();
             if (remembered is null)
             {
+                _airPodsClassicConnected = false;
                 return;
             }
 
-            if (!string.Equals(
+            var addressChanged = !string.Equals(
                     _airPodsAddress,
                     remembered.Address,
-                    StringComparison.OrdinalIgnoreCase))
+                    StringComparison.OrdinalIgnoreCase);
+            var connectionDropped = _airPodsClassicConnected && !remembered.Connected;
+            var connectionRestored = !_airPodsClassicConnected && remembered.Connected;
+            if (addressChanged || connectionDropped || connectionRestored)
             {
                 ResetAacpConnection();
             }
 
             _airPodsAddress = remembered.Address;
+            _airPodsClassicConnected = remembered.Connected;
             DeviceAddress.Text = remembered.Address;
             ConnectionBadge.Text = remembered.Connected
                 ? "Connected · Stereo"
@@ -636,6 +852,38 @@ public partial class MainWindow : Window
         {
             StatusLog.Text =
                 $"Bluetooth: {Shorten(exception.Message, 52)}";
+            SoundStageAppLog.Write($"Remembered AirPods lookup failed: {exception}");
+        }
+    }
+
+    private async void ConnectionTimer_OnTick(object? sender, EventArgs e)
+    {
+        if (_connectionRefreshInProgress)
+        {
+            return;
+        }
+
+        _connectionRefreshInProgress = true;
+        try
+        {
+            LoadRememberedAirPods();
+            if (_airPodsClassicConnected && _driverClient is null)
+            {
+                await RepairControlPathAsync(force: false);
+            }
+            else if (!_airPodsClassicConnected &&
+                     DateTime.UtcNow - _lastAdvertisementReceived >
+                     TimeSpan.FromSeconds(8))
+            {
+                ConnectionBadge.Text = _airPodsAddress is null
+                    ? "Scanning AirPods over BLE…"
+                    : "Remembered · reconnecting";
+                ConnectionDot.Fill = Brushes.Gold;
+            }
+        }
+        finally
+        {
+            _connectionRefreshInProgress = false;
         }
     }
 
@@ -645,18 +893,18 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
+            _lastAdvertisementReceived = DateTime.UtcNow;
             DeviceModel.Text = status.Model;
-            if (string.IsNullOrWhiteSpace(_airPodsAddress))
-            {
-                _airPodsAddress = status.Address;
-            }
-
-            DeviceAddress.Text = _airPodsAddress;
+            DeviceAddress.Text = _airPodsAddress ?? status.Address;
             SetBattery(LeftBatteryText, status.LeftBattery, status.IsLeftCharging);
             SetBattery(RightBatteryText, status.RightBattery, status.IsRightCharging);
             UpdateCaseBattery(status.CaseBattery, status.IsCaseCharging);
-            ConnectionBadge.Text = "Connected · Stereo";
-            ConnectionDot.Fill = (Brush)FindResource("SuccessBrush");
+            ConnectionBadge.Text = _airPodsClassicConnected
+                ? "Connected · Stereo"
+                : "AirPods nearby · BLE";
+            ConnectionDot.Fill = _airPodsClassicConnected
+                ? (Brush)FindResource("SuccessBrush")
+                : Brushes.Gold;
             StatusLog.Text =
                 $"{(status.IsLeftInEar ? "L in ear" : "L out")} · " +
                 $"{(status.IsRightInEar ? "R in ear" : "R out")} · " +
@@ -714,8 +962,11 @@ public partial class MainWindow : Window
             "The case broadcasts its battery while it is open.";
     }
 
-    private void Scanner_OnStatusChanged(object? sender, string status) =>
+    private void Scanner_OnStatusChanged(object? sender, string status)
+    {
+        SoundStageAppLog.Write(status);
         Dispatcher.Invoke(() => StatusLog.Text = Shorten(status, 66));
+    }
 
     private void ApplySavedNoiseMode()
     {

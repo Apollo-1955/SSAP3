@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using SoundStage.Core;
+using SoundStage.Platform.Windows;
 
 namespace SoundStage.Diagnostics;
 
@@ -16,12 +17,35 @@ internal static class WindowsCollector
         var ubr = key?.GetValue("UBR") is int value ? value : 0;
 
         _ = int.TryParse(buildText, out var build);
+        uint codeIntegrityOptions;
+        try
+        {
+            codeIntegrityOptions = WindowsCodeIntegrity.Options;
+        }
+        catch
+        {
+            codeIntegrityOptions = 0;
+        }
+
+        bool? secureBootEnabled = null;
+        using (var secureBoot = Registry.LocalMachine.OpenSubKey(
+                   @"SYSTEM\CurrentControlSet\Control\SecureBoot\State"))
+        {
+            if (secureBoot?.GetValue("UEFISecureBootEnabled") is int secureBootValue)
+            {
+                secureBootEnabled = secureBootValue != 0;
+            }
+        }
+
         return new WindowsInfo(
             productName,
             displayVersion,
             build,
             ubr,
-            Environment.Is64BitOperatingSystem ? "x64" : "x86");
+            Environment.Is64BitOperatingSystem ? "x64" : "x86",
+            codeIntegrityOptions,
+            (codeIntegrityOptions & 0x2) != 0,
+            secureBootEnabled);
     }
 
     public static AudioRouteRecommendation BuildRecommendation(

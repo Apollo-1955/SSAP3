@@ -14,6 +14,10 @@ internal static class ReportFormatter
             $"Windows: {report.Windows.ProductName} {report.Windows.DisplayVersion}, " +
             $"build {report.Windows.CurrentBuild}.{report.Windows.UpdateBuildRevision}, " +
             report.Windows.Architecture);
+        builder.AppendLine(
+            $"Code Integrity: 0x{report.Windows.CodeIntegrityOptions:X8}; " +
+            $"Test Mode active={report.Windows.TestSigningActive}; " +
+            $"Secure Boot={report.Windows.SecureBootEnabled?.ToString() ?? "unknown"}");
 
         builder.AppendLine();
         builder.AppendLine("Bluetooth radios:");
