@@ -22,9 +22,9 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-01 | Critical | Self-signed certificate trusted as root CA | **Fixed** | No trust-store writes anywhere in `installer/`, enforced by a CI grep. Dev certificate is non-exportable, `CA:false`, dev-PC only (`tools/dev`). |
 | S-02 | Critical | LPE via user-writable elevated scripts and state | **Fixed (not executed)** | Elevated payload in `%ProgramFiles%\SSAP3\setup`. Ownership and ACL checks before use. `%ProgramData%\SSAP3` created with protected ACLs and refused if planted. Manifest admin-only. Parse-checked; not run, because it needs elevation. |
 | S-03 | Critical | Install requires disabling Secure Boot / Test Mode / BitLocker | **Fixed** | No BCD, Secure Boot or BitLocker code in production setup (CI grep). The driver is installed only from a Microsoft-signed catalog. |
-| S-04 | High | NaN shared state → OOB read in `audiodg.exe` | **Fixed (compiled in CI only)** | `Ssap3ValidateState`, masked `ReadDelay`, input sanitising. Regression tests for NaN, Inf, non-unit, stale and out-of-range records in `spatializer_smoke.cpp`. **Not compiled locally (no MSVC).** |
-| S-05 | High | Unbounded kernel sessions | **Fixed (compiled in CI only)** | 1 session per handle, 4 per device. Dead 512-byte buffer removed. |
-| S-06 | High | Untimed BRBs and reader-stop race | **Fixed (compiled in CI only)** | Timeouts: open 10 s, close 3 s, send 2 s, queries 5 s. Dekker-style stop with post-send cancel and `KeFlushQueuedDpcs`. Zombie list instead of freeing memory a late completion can touch. **Needs Driver Verifier on hardware.** |
+| S-04 | High | NaN shared state → OOB read in `audiodg.exe` | **Fixed (compiled in CI, run #4)** | `Ssap3ValidateState`, masked `ReadDelay`, input sanitising. Regression tests for NaN, Inf, non-unit, stale and out-of-range records in `spatializer_smoke.cpp` **pass in CI** (run #4). |
+| S-05 | High | Unbounded kernel sessions | **Fixed (compiled in CI, run #4)** | 1 session per handle, 4 per device. Dead 512-byte buffer removed. |
+| S-06 | High | Untimed BRBs and reader-stop race | **Fixed (compiled in CI, run #4)** | Timeouts: open 10 s, close 3 s, send 2 s, queries 5 s. Dekker-style stop with post-send cancel and `KeFlushQueuedDpcs`. Zombie list instead of freeing memory a late completion can touch. **Needs Driver Verifier on hardware.** |
 | S-07 | High | Silent `DisableProtectedAudioDG` and ACL changes | **Fixed (not executed)** | Explicit opt-in task with a consent page. Prior value, FX values and key SDDL recorded and restored. |
 | S-08 | Medium | Caller-chosen remote address | **Fixed** | Sessions always target the PDO address; a mismatch is rejected. |
 | S-09 | Medium | Arbitrary AACP relay | **Fixed** | Device SDDL is `SY/BA:GA, IU:GRGW`. Outbound allowlist: handshake; opcodes `0x09` (ids `0x06`/`0x0D`/`0x28` only), `0x0F`, `0x17`, `0x4D`. |
@@ -40,7 +40,7 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-19 | Low | Wall-clock IPC timestamps | **Fixed** | `GetTickCount64` on both sides. |
 | S-20 | Low | CI hardening gaps | **Fixed** | Actions pinned by SHA. Least-privilege permissions. CodeQL (C#, C/C++), gitleaks, dependency review, NuGet audit, script checks. First run (#1, `414b091`): CodeQL C# and C/C++, gitleaks and script checks passed. |
 | S-21 | Info | Unsigned artifacts | **Open** | Needs an OV/EV code-signing certificate. |
-| S-22 | Medium | INF set device security in the software key, where PnP ignores it | **Fixed (compiled in CI only)** | `Security`, `DeviceCharacteristics` (`FILE_DEVICE_SECURE_OPEN`) and `DeviceType` moved to the `.HW` section. Runtime effect needs verification on hardware. |
+| S-22 | Medium | INF set device security in the software key, where PnP ignores it | **Fixed (compiled in CI, run #4)** | `Security`, `DeviceCharacteristics` (`FILE_DEVICE_SECURE_OPEN`) and `DeviceType` moved to the `.HW` section. Runtime effect needs verification on hardware. |
 
 No **critical or high** finding is open in source. Several fixes are **not
 yet compiled or executed** (see §6). Until they are, they are not
@@ -106,7 +106,8 @@ after setup.
 | Secret scan (`git grep` for key headers and tokens) | 0 secrets |
 | App launch on real Windows 11 26200 | Starts; honest states shown (Bluetooth off, AAP driver missing, engine not installed). A TimeSpan overflow crash found by this run was **fixed**. |
 | CI run #1 (GitHub Actions, `414b091`) | CodeQL `security-extended` for C# and C/C++: pass. gitleaks: pass. Script parse and forbidden-operation checks: pass. Spatial engine compiled under `/W4 /WX /guard:cf`. Spatial-engine tests and the managed test build failed (fixed in the next commits; see `DEVELOPMENT_STATUS.md`). |
-| **Not performed** | Driver compilation (not reached in run #1); Driver Verifier; Application Verifier; ASan/UBSan; coverage-guided fuzzing; installer and uninstaller execution; any AirPods hardware test |
+| CI run #4 (`f3cf186`) | **All jobs pass.** Driver compiles (`/W4 /WX /guard:cf`), links and passes InfVerif; spatial-engine tests pass. |
+| **Not performed** | Loading the driver anywhere; Driver Verifier; Application Verifier; ASan/UBSan; coverage-guided fuzzing; installer and uninstaller execution; any AirPods hardware test |
 
 ## 7. Driver security review (source)
 

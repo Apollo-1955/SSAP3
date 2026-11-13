@@ -46,8 +46,8 @@ The status legend:
 | Core tests (115) | ✓ | ✓ | ✓ | — |
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
-| Spatial engine (C++) and its tests | ✓ | compiled in CI; tests failed in run #1 | ✗ (no MSVC locally) | — |
-| Driver (C) | ✓ | — | ✗ (no WDK locally; not reached in CI run #1) | — |
+| Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
+| Driver (C) | ✓ | compiles, links, passes InfVerif (CI run #4); not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked | ✗ (needs admin and changes the audio stack) | — |
 | System-state verifier | ✓ | — | ✓ (`-Verify` pass) | n/a |
 | CI workflow | ✓ | — | ✓ (runs on every push) | n/a |
@@ -57,6 +57,9 @@ The status legend:
 | Run | Commit | Result |
 | --- | --- | --- |
 | #1 | `414b091` | CodeQL C# and C/C++, gitleaks and script checks passed. The spatial engine compiled cleanly. Two failures: the managed test build (the runner used a newer SDK, and C# 14 binds `array.Reverse()` to the in-place span overload) and the spatial-engine tests (failure text only in the sign-in-gated log). Fixed with a `global.json` SDK pin, an explicit `Enumerable.Reverse`, test-failure annotations, and a separate driver job. |
+| #2 | `fda1a94` | Managed job green. The spatializer test failed to compile (`C2589`: the `windows.h` `max` macro shadowed `std::max`). Driver failed with no detail. |
+| #3 | `d56b0d3` | Spatial engine built and passed all tests. Driver: `queue.c(230)` `C4018` signed/unsigned compare against `FIELD_OFFSET`, fatal under `/WX`. |
+| #4 | `f3cf186` | **All jobs green:** managed build and 115 tests, NuGet audit, spatial engine build and tests, driver compile, link and InfVerif, CodeQL C# and C/C++, gitleaks, script checks. |
 
 ## Blockers (need the maintainer)
 
@@ -71,7 +74,8 @@ The status legend:
 
 ## Next steps
 
-1. Make CI fully green: spatial-engine tests and the first driver compile.
+1. Load-test the driver on a development PC with Driver Verifier, and
+   submit it for attestation signing.
 2. Run the installer and uninstaller on a disposable Windows 11 VM with
    before/after snapshots.
 3. HRIR convolution renderer and SOFA import (ADR-5), with a fuzzed loader.
