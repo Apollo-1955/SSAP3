@@ -227,7 +227,8 @@ Ssap3HandleSendPacket(
     }
 
     packetLength = input->packet_length;
-    if (input->struct_size < FIELD_OFFSET(ssap3_driver_send_packet_request, packet) ||
+    /* FIELD_OFFSET is a signed LONG; compare as unsigned (C4018). */
+    if (input->struct_size < (ULONG)FIELD_OFFSET(ssap3_driver_send_packet_request, packet) ||
         input->session_id == 0 ||
         packetLength == 0 ||
         packetLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
@@ -235,7 +236,7 @@ Ssap3HandleSendPacket(
         return STATUS_INVALID_PARAMETER;
     }
 
-    requiredLength = FIELD_OFFSET(ssap3_driver_send_packet_request, packet) + (size_t)packetLength;
+    requiredLength = (size_t)FIELD_OFFSET(ssap3_driver_send_packet_request, packet) + (size_t)packetLength;
     if (inputLength < requiredLength) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_BUFFER_TOO_SMALL;
@@ -345,7 +346,10 @@ Ssap3HandleReadPacket(
 
     output->packet_length = packetLength;
     output->receive_interrupt_time = receiveTime;
-    Ssap3CompleteRequest(Request, STATUS_SUCCESS, FIELD_OFFSET(ssap3_driver_read_packet_response, packet) + packetLength);
+    Ssap3CompleteRequest(
+        Request,
+        STATUS_SUCCESS,
+        (size_t)FIELD_OFFSET(ssap3_driver_read_packet_response, packet) + (size_t)packetLength);
     return STATUS_SUCCESS;
 }
 

@@ -102,7 +102,7 @@ jobs:
           $code = $LASTEXITCODE
           $log | ForEach-Object { Write-Output $_ }
           if ($code -ne 0) {
-            $errors = @($log | Where-Object { $_ -match '(?i)\b(error|fatal)\b|not found|failed' } | Select-Object -Last 30)
+            $errors = @($log | Where-Object { $_ -match '(?i)\b(error|fatal)\b|warning [A-Z]+\d+|not found|failed' } | Select-Object -Last 30)
             if ($errors.Count -eq 0) { $errors = @($log | Select-Object -Last 30) }
             $text = ($errors -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error title=Driver build failed::$text"
