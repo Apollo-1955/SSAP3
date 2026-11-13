@@ -4,6 +4,13 @@
 // with a private state file (SSAP3_SPATIAL_STATE_PATH) so the test never
 // touches %ProgramData%. Simulated input only: no audio device is used.
 
+// windows.h otherwise defines min/max macros that break std::min/std::max.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <algorithm>

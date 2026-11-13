@@ -94,8 +94,20 @@ jobs:
         run: dotnet restore driver/WdkPackages.proj
 
       - name: Build driver and run InfVerif (unsigned; never test-signed in CI)
-        shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1
+        shell: pwsh
+        run: |
+          # Capture compiler/linker/InfVerif output so failures appear as public
+          # annotations (raw job logs require signing in).
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          if ($code -ne 0) {
+            $errors = @($log | Where-Object { $_ -match '(?i)\b(error|fatal)\b|not found|failed' } | Select-Object -Last 30)
+            if ($errors.Count -eq 0) { $errors = @($log | Select-Object -Last 30) }
+            $text = ($errors -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Driver build failed::$text"
+            exit $code
+          }
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

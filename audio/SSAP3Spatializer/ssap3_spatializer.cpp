@@ -6,6 +6,14 @@
 // treated as untrusted input and validated on every read (SECURITY_AUDIT.md,
 // finding S-04).
 
+// Also passed on the command line; repeated so every build of this file is safe
+// from the windows.h min/max macros.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <xmmintrin.h>
 
