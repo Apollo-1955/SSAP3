@@ -27,9 +27,9 @@
 | `8a3d870` | chore: rename project to SSAP3 (plus security analyzers, DLL search policy, `asInvoker`) |
 | `e3b2074` | security(driver): bounded waits, session caps, PDO address binding, outbound allowlist |
 | `a1e1fee` | security(audio): validated shared state, crossfaded mode changes |
-| `8adcac9` | feat: protocol, motion and connection core; supervised control center; 115 tests |
-| `983f8dc` | security(installer): manifest-driven setup, verifier, SBOM, dev tools, CI |
-| next | docs: install/development/architecture guides, security report, status; `--tray` autostart |
+| `4ba926e` | feat: protocol, motion and connection core; supervised control center; 115 tests |
+| `b98e17d` | security(installer): manifest-driven setup, verifier, SBOM, dev tools, CI |
+| `c1e151d` | docs: install/development/architecture guides, security report, status |
 
 ## Verification status
 
