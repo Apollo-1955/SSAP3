@@ -1,9 +1,22 @@
+;
+; ssap3aap.inf - SSAP3 AAP control transport (KMDF profile driver)
+;
+; Binds only to the Apple AAP service PDO {74ec2172-...} (and, as a
+; reconnect fallback, the Apple UARP service PDO {4715650b-...}) that the
+; Windows Bluetooth enumerator creates for paired AirPods. It does not
+; replace the Bluetooth adapter driver, Microsoft enumerators, A2DP, HFP,
+; AVRCP or any other service.
+;
+; Production installs require this package to carry a Microsoft signature
+; (attestation or WHQL). SSAP3 Setup never enables Test Mode.
+;
+
 [Version]
 Signature="$WINDOWS NT$"
 Class=Bluetooth
 ClassGuid={e0cbf06c-cd8b-4647-bb8a-263b43f0f974}
 Provider=%ProviderName%
-DriverVer=07/31/2026,0.4.0.0
+DriverVer=11/13/2026,0.5.0.0
 CatalogFile=ssap3aap.cat
 PnpLockdown=1
 
@@ -20,52 +33,50 @@ ssap3aap.sys=1
 %ProviderName%=Standard,NTamd64.10.0...19041
 
 [Standard.NTamd64.10.0...19041]
-; Apple UARP service. Binding here gives the driver a stable fallback profile
-; PDO on Bluetooth stacks that do not recreate the AAP PDO after reconnect.
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2002
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&200e
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&200f
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&200a
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2013
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2014
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2019
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&201b
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&201f
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2024
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_GENERIC
+; Apple AAP profile service.
+; PID 2027 = AirPods Pro 3 (observed on real hardware, see HARDWARE_COMPATIBILITY.md).
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2027
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2024
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2014
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200e
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&201b
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2019
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2013
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200f
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2002
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200a
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&201f
+; Compatible-ID fallback reported by Windows for every AAP service PDO.
+%AapDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}
 
-; Apple AAP profile UUID used by current AirPods firmware.
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2002
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200e
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200f
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&200a
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2013
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2014
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2019
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&201b
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&201f
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_VID&0001004c_PID&2024
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}
-%ProfileDeviceName%=SSAP3_Profile_Install,BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}_GENERIC
+; Apple UARP service: fallback parent for the same AACP PSM on stacks that do
+; not recreate the AAP PDO after reconnect. SSAP3 never performs firmware updates.
+%UarpDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2027
+%UarpDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&2024
+%UarpDeviceName%=SSAP3_Profile_Install,BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}_VID&0001004c_PID&201b
 
 [SSAP3_Profile_Install.NT]
 CopyFiles=DriverCopyFiles
-AddReg=SSAP3_Device_AddReg
+
+[SSAP3_Profile_Install.NT.HW]
+; Device-stack security must be in the hardware key (.HW): PnP ignores these
+; values in the software key. Interactive users get read/write so the
+; unprivileged SSAP3 Control Center can talk to the device; nobody else does.
+AddReg=SSAP3_Device_Security_AddReg
+
+[SSAP3_Device_Security_AddReg]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+HKR,,DeviceCharacteristics,0x10001,0x00000100
+HKR,,DeviceType,0x10001,0x00000022
 
 [SSAP3_Profile_Install.NT.Interfaces]
-AddInterface={3E98D13A-B2A5-4C3D-AE1E-8DB4F3D8C1F0},,"SSAP3_Interface"
+AddInterface={1C3A8128-3668-4428-95A4-B1CAD51B7249},,SSAP3_Interface
 
 [SSAP3_Interface]
 AddReg=SSAP3_Interface_AddReg
 
 [SSAP3_Interface_AddReg]
-HKR,,FriendlyName,,%ProfileDeviceName%
-
-[SSAP3_Device_AddReg]
-HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;BU)"
-HKR,,DeviceCharacteristics,0x10001,0x00000100
-HKR,,DeviceType,0x10001,0x00000022
+HKR,,FriendlyName,,%AapDeviceName%
 
 [DriverCopyFiles]
 ssap3aap.sys
@@ -75,6 +86,7 @@ AddService=ssap3aap,0x00000002,SSAP3_Service_Install
 
 [SSAP3_Service_Install]
 DisplayName=%ServiceDisplayName%
+Description=%ServiceDescription%
 ServiceType=1
 StartType=3
 ErrorControl=1
@@ -88,6 +100,8 @@ KmdfLibraryVersion=1.31
 
 [Strings]
 ProviderName="SSAP3"
-ProfileDeviceName="SSAP3 Apple Control Profile"
-ServiceDisplayName="SSAP3 Apple Control Profile"
+AapDeviceName="SSAP3 AAP Control Transport"
+UarpDeviceName="SSAP3 AAP Control Transport (UARP fallback)"
+ServiceDisplayName="SSAP3 AAP Control Transport"
+ServiceDescription="Narrow AACP L2CAP transport for SSAP3. No firmware, audio or adapter functions."
 DiskName="SSAP3 Driver Package"

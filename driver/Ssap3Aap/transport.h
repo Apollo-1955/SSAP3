@@ -18,10 +18,15 @@ Ssap3TransportOpenSession(
     _Out_ ULONG* DriverError
     );
 
+/*
+ * Stops the reader and closes the L2CAP channel with bounded waits.
+ * *CanFree is TRUE only when no read can still complete into the session.
+ */
 NTSTATUS
 Ssap3TransportCloseSession(
     _In_ WDFDEVICE Device,
     _Inout_ PSSAP3_SESSION_ENTRY Session,
+    _Out_ BOOLEAN* CanFree,
     _Out_ ULONG* DriverError
     );
 
@@ -41,5 +46,16 @@ Ssap3TransportReadPacket(
     _Out_writes_bytes_to_(PacketBufferLength, *PacketLength) UCHAR* PacketBuffer,
     _In_ ULONG PacketBufferLength,
     _Out_ ULONG* PacketLength,
+    _Out_ ULONGLONG* ReceiveInterruptTime,
     _Out_ ULONG* DriverError
+    );
+
+/*
+ * Least-privilege AACP framing check for outbound packets (S-09): only the
+ * handshake and the opcodes/control identifiers SSAP3 actually uses.
+ */
+BOOLEAN
+Ssap3IsAllowedOutboundPacket(
+    _In_reads_bytes_(PacketLength) const UCHAR* Packet,
+    _In_ ULONG PacketLength
     );

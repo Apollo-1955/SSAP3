@@ -10,9 +10,16 @@
 
 #include "../shared/ssap3_driver_protocol.h"
 
-#define SSAP3_DRIVER_POOL_TAG 'pLbL'
-#define SSAP3_SESSION_POOL_TAG 'sLbL'
+/* Pool tags display as "SS3D" / "SS3S" in pool tools. */
+#define SSAP3_DRIVER_POOL_TAG 'D3SS'
+#define SSAP3_SESSION_POOL_TAG 'S3SS'
 #define SSAP3_PACKET_QUEUE_DEPTH 32u
+
+/* Bounded waits (SECURITY_AUDIT.md, S-06). */
+#define SSAP3_OPEN_CHANNEL_TIMEOUT_MS 10000
+#define SSAP3_CLOSE_CHANNEL_TIMEOUT_MS 3000
+#define SSAP3_SEND_PACKET_TIMEOUT_MS 2000
+#define SSAP3_READER_STOP_TIMEOUT_MS 3000
 
 #define SSAP3_INIT_FLAG_PROFILE_INTERFACE 0x00000001u
 #define SSAP3_INIT_FLAG_REMOTE_DEVICE_INFO 0x00000002u
@@ -29,8 +36,6 @@ typedef struct _SSAP3_SESSION_ENTRY {
     L2CAP_CHANNEL_HANDLE ChannelHandle;
     ULONG CapabilityFlags;
     ULONG Mtu;
-    ULONG LastPacketLength;
-    UCHAR LastPacket[SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH];
     WDFREQUEST ReaderRequest;
     WDFMEMORY ReaderBufferMemory;
     WDFMEMORY ReaderBrbMemory;
@@ -38,18 +43,20 @@ typedef struct _SSAP3_SESSION_ENTRY {
     KDPC ReaderResubmitDpc;
     KEVENT ReaderStoppedEvent;
     volatile LONG ReaderStopping;
-    volatile LONG ReaderStarted;
+    volatile LONG ReaderInFlight;
     NTSTATUS ReaderStatus;
     KSPIN_LOCK PacketLock;
     ULONG PacketQueueHead;
     ULONG PacketQueueTail;
     ULONG PacketQueueCount;
     ULONG PacketQueueLengths[SSAP3_PACKET_QUEUE_DEPTH];
+    ULONGLONG PacketQueueTimes[SSAP3_PACKET_QUEUE_DEPTH];
     UCHAR PacketQueue[SSAP3_PACKET_QUEUE_DEPTH][SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH];
 } SSAP3_SESSION_ENTRY, *PSSAP3_SESSION_ENTRY;
 
 typedef struct _SSAP3_FILE_CONTEXT {
     BOOLEAN CleanupStarted;
+    ULONG SessionCount;
 } SSAP3_FILE_CONTEXT, *PSSAP3_FILE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(SSAP3_FILE_CONTEXT, Ssap3GetFileContext)
@@ -57,6 +64,9 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(SSAP3_FILE_CONTEXT, Ssap3GetFileContext)
 typedef struct _SSAP3_DEVICE_CONTEXT {
     WDFWAITLOCK SessionLock;
     LIST_ENTRY Sessions;
+    /* Sessions whose reader could not be confirmed stopped; freed at device cleanup. */
+    LIST_ENTRY ZombieSessions;
+    ULONG SessionCount;
     UINT64 NextSessionId;
     BOOLEAN HasProfileDriverInterface;
     BOOLEAN HasRemoteDeviceInfo;
@@ -97,4 +107,15 @@ PSSAP3_SESSION_ENTRY
 Ssap3FindSessionLocked(
     _In_ PSSAP3_DEVICE_CONTEXT DeviceContext,
     _In_ UINT64 SessionId
+    );
+
+/*
+ * Closes a session that has already been unlinked from DeviceContext->Sessions,
+ * then frees it, or parks it on the zombie list if its reader could not be
+ * confirmed stopped. Caller holds SessionLock. Runs at PASSIVE_LEVEL.
+ */
+NTSTATUS
+Ssap3DestroySessionLocked(
+    _In_ WDFDEVICE Device,
+    _Inout_ PSSAP3_SESSION_ENTRY Session
     );

@@ -1,19 +1,17 @@
+/*
+ * SSAP3 AAP profile driver: L2CAP transport for the AACP channel (PSM 0x1001).
+ *
+ * Adapted from the GPL-3.0 LibrePods Windows profile transport and hardened for
+ * SSAP3 (SECURITY_AUDIT.md):
+ *   S-06  every BRB has a bounded timeout; the reader stop path cannot hang or
+ *         free memory that a late completion or DPC still uses;
+ *   S-08  sessions always target the PDO's own remote address;
+ *   S-09  outbound packets are limited to the AACP framing SSAP3 uses.
+ * The driver never interprets inbound packet content.
+ */
 #include "transport.h"
 
 #include <bthioctl.h>
-
-static
-NTSTATUS
-Ssap3SubmitContinuousRead(
-    _In_ WDFDEVICE Device,
-    _Inout_ PSSAP3_SESSION_ENTRY Session
-    );
-
-static
-VOID
-Ssap3StopContinuousReader(
-    _Inout_ PSSAP3_SESSION_ENTRY Session
-    );
 
 static
 VOID
@@ -55,6 +53,7 @@ Ssap3TryParseHexNibble(
         return TRUE;
     }
 
+    *Value = 0;
     return FALSE;
 }
 
@@ -68,7 +67,8 @@ Ssap3ParseBluetoothAddress(
     UCHAR octets[6];
     ULONG index;
 
-    if (BluetoothAddress == NULL || RemoteAddress == NULL) {
+    *RemoteAddress = 0;
+    if (BluetoothAddress == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -134,15 +134,18 @@ Ssap3MapNtStatusToDriverError(
         case STATUS_BUFFER_TOO_SMALL:
             return SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
 
+        case STATUS_CONNECTION_DISCONNECTED:
+        case STATUS_CONNECTION_RESET:
+            return SSAP3_DRIVER_ERROR_DISCONNECTED;
+
         case STATUS_DEVICE_NOT_CONNECTED:
         case STATUS_DEVICE_NOT_READY:
         case STATUS_INVALID_DEVICE_STATE:
         case STATUS_PROTOCOL_UNREACHABLE:
-        case STATUS_CONNECTION_DISCONNECTED:
-        case STATUS_CONNECTION_RESET:
         case STATUS_CONNECTION_REFUSED:
         case STATUS_TIMEOUT:
         case STATUS_IO_TIMEOUT:
+        case STATUS_CANCELLED:
             return SSAP3_DRIVER_ERROR_TRANSPORT_BLOCKED;
 
         default:
@@ -154,11 +157,13 @@ static
 NTSTATUS
 Ssap3SubmitBrbSynchronously(
     _In_ WDFDEVICE Device,
-    _Inout_ PBRB Brb
+    _Inout_ PBRB Brb,
+    _In_ ULONG TimeoutMilliseconds
     )
 {
     WDFIOTARGET ioTarget;
     WDF_MEMORY_DESCRIPTOR otherArg1;
+    WDF_REQUEST_SEND_OPTIONS sendOptions;
     NTSTATUS status;
     ULONG_PTR bytesReturned;
 
@@ -169,6 +174,8 @@ Ssap3SubmitBrbSynchronously(
 
     bytesReturned = 0;
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&otherArg1, Brb, Brb->BrbHeader.Length);
+    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(TimeoutMilliseconds));
 
     status = WdfIoTargetSendInternalIoctlOthersSynchronously(
         ioTarget,
@@ -177,7 +184,7 @@ Ssap3SubmitBrbSynchronously(
         &otherArg1,
         NULL,
         NULL,
-        NULL,
+        &sendOptions,
         &bytesReturned);
 
     if (NT_SUCCESS(status) && !NT_SUCCESS(Brb->BrbHeader.Status)) {
@@ -208,17 +215,17 @@ Ssap3QueueReceivedPacket(
 
     KeAcquireSpinLock(&Session->PacketLock, &oldIrql);
 
+    /* Bounded queue: the oldest packet is dropped when a slow client falls behind. */
     if (Session->PacketQueueCount == SSAP3_PACKET_QUEUE_DEPTH) {
-        Session->PacketQueueHead =
-            (Session->PacketQueueHead + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
+        Session->PacketQueueHead = (Session->PacketQueueHead + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
         Session->PacketQueueCount--;
     }
 
     slot = Session->PacketQueueTail;
     RtlCopyMemory(Session->PacketQueue[slot], Packet, PacketLength);
     Session->PacketQueueLengths[slot] = PacketLength;
-    Session->PacketQueueTail =
-        (Session->PacketQueueTail + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
+    Session->PacketQueueTimes[slot] = KeQueryInterruptTime();
+    Session->PacketQueueTail = (Session->PacketQueueTail + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
     Session->PacketQueueCount++;
 
     KeReleaseSpinLock(&Session->PacketLock, oldIrql);
@@ -237,25 +244,19 @@ Ssap3FormatContinuousRead(
     size_t packetBufferLength;
 
     deviceContext = Ssap3GetDeviceContext(Device);
-    deviceContext->ProfileDriverInterface.BthReuseBrb(
-        &Session->ReaderBrb,
-        BRB_L2CA_ACL_TRANSFER);
+    deviceContext->ProfileDriverInterface.BthReuseBrb(&Session->ReaderBrb, BRB_L2CA_ACL_TRANSFER);
 
-    packetBuffer = WdfMemoryGetBuffer(
-        Session->ReaderBufferMemory,
-        &packetBufferLength);
+    packetBuffer = WdfMemoryGetBuffer(Session->ReaderBufferMemory, &packetBufferLength);
     if (packetBuffer == NULL ||
         packetBufferLength == 0 ||
-        packetBufferLength > MAXULONG) {
+        packetBufferLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
     transferBrb = &Session->ReaderBrb.BrbL2caAclTransfer;
     transferBrb->BtAddress = Session->RemoteAddress;
     transferBrb->ChannelHandle = Session->ChannelHandle;
-    transferBrb->TransferFlags =
-        ACL_TRANSFER_DIRECTION_IN |
-        ACL_SHORT_TRANSFER_OK;
+    transferBrb->TransferFlags = ACL_TRANSFER_DIRECTION_IN | ACL_SHORT_TRANSFER_OK;
     transferBrb->BufferSize = (ULONG)packetBufferLength;
     transferBrb->Buffer = packetBuffer;
     transferBrb->BufferMDL = NULL;
@@ -274,56 +275,58 @@ Ssap3FormatContinuousRead(
         NULL);
 }
 
+/*
+ * Submits the next continuous read. Runs at PASSIVE_LEVEL (first submission,
+ * under SessionLock) or DISPATCH_LEVEL (resubmit DPC).
+ *
+ * Stop protocol: the submitter publishes ReaderInFlight = 1 and then reads
+ * ReaderStopping. The stopper publishes ReaderStopping = 1 and then reads
+ * ReaderInFlight. Interlocked operations are full barriers, so at least one
+ * side sees the other. A stopper that cancels before WdfRequestSend is
+ * covered by the post-send re-check below, which cancels the read itself.
+ */
 static
 NTSTATUS
 Ssap3SubmitContinuousRead(
-    WDFDEVICE Device,
-    PSSAP3_SESSION_ENTRY Session
+    _In_ WDFDEVICE Device,
+    _Inout_ PSSAP3_SESSION_ENTRY Session
     )
 {
     WDF_REQUEST_REUSE_PARAMS reuseParameters;
     NTSTATUS status;
 
-    WDF_REQUEST_REUSE_PARAMS_INIT(
-        &reuseParameters,
-        WDF_REQUEST_REUSE_NO_FLAGS,
-        STATUS_UNSUCCESSFUL);
+    WDF_REQUEST_REUSE_PARAMS_INIT(&reuseParameters, WDF_REQUEST_REUSE_NO_FLAGS, STATUS_UNSUCCESSFUL);
     status = WdfRequestReuse(Session->ReaderRequest, &reuseParameters);
+    if (NT_SUCCESS(status)) {
+        status = Ssap3FormatContinuousRead(Device, Session);
+    }
+
     if (!NT_SUCCESS(status)) {
         Session->ReaderStatus = status;
+        KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
+        return status;
+    }
+
+    WdfRequestSetCompletionRoutine(Session->ReaderRequest, Ssap3ReaderCompletion, Session);
+    KeClearEvent(&Session->ReaderStoppedEvent);
+    InterlockedExchange(&Session->ReaderInFlight, 1);
+
+    if (InterlockedCompareExchange(&Session->ReaderStopping, 0, 0) != 0) {
+        InterlockedExchange(&Session->ReaderInFlight, 0);
+        KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
+        return STATUS_CANCELLED;
+    }
+
+    if (!WdfRequestSend(Session->ReaderRequest, WdfDeviceGetIoTarget(Device), WDF_NO_SEND_OPTIONS)) {
+        status = WdfRequestGetStatus(Session->ReaderRequest);
+        Session->ReaderStatus = status;
+        InterlockedExchange(&Session->ReaderInFlight, 0);
         KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
         return status;
     }
 
     if (InterlockedCompareExchange(&Session->ReaderStopping, 0, 0) != 0) {
-        KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
-        return STATUS_SUCCESS;
-    }
-
-    status = Ssap3FormatContinuousRead(Device, Session);
-    if (!NT_SUCCESS(status)) {
-        Session->ReaderStatus = status;
-        KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
-        return status;
-    }
-
-    WdfRequestSetCompletionRoutine(
-        Session->ReaderRequest,
-        Ssap3ReaderCompletion,
-        Session);
-
-    KeClearEvent(&Session->ReaderStoppedEvent);
-    InterlockedExchange(&Session->ReaderStarted, 1);
-
-    if (!WdfRequestSend(
-            Session->ReaderRequest,
-            WdfDeviceGetIoTarget(Device),
-            WDF_NO_SEND_OPTIONS)) {
-        status = WdfRequestGetStatus(Session->ReaderRequest);
-        Session->ReaderStatus = status;
-        InterlockedExchange(&Session->ReaderStarted, 0);
-        KeSetEvent(&Session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
-        return status;
+        (VOID)WdfRequestCancelSentRequest(Session->ReaderRequest);
     }
 
     return STATUS_SUCCESS;
@@ -368,16 +371,13 @@ Ssap3ReaderCompletion(
 
     session = (PSSAP3_SESSION_ENTRY)Context;
     status = Params->IoStatus.Status;
-    InterlockedExchange(&session->ReaderStarted, 0);
 
     if (NT_SUCCESS(status)) {
         ULONG packetLength;
         const UCHAR* packetBuffer;
 
         packetLength = session->ReaderBrb.BrbL2caAclTransfer.BufferSize;
-        packetBuffer = (const UCHAR*)WdfMemoryGetBuffer(
-            session->ReaderBufferMemory,
-            NULL);
+        packetBuffer = (const UCHAR*)WdfMemoryGetBuffer(session->ReaderBufferMemory, NULL);
         if (packetBuffer != NULL &&
             packetLength != 0 &&
             packetLength <= SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
@@ -387,19 +387,33 @@ Ssap3ReaderCompletion(
         session->ReaderStatus = status;
     }
 
-    if (InterlockedCompareExchange(&session->ReaderStopping, 0, 0) != 0 ||
-        !NT_SUCCESS(status)) {
+    InterlockedExchange(&session->ReaderInFlight, 0);
+
+    if (InterlockedCompareExchange(&session->ReaderStopping, 0, 0) != 0 || !NT_SUCCESS(status)) {
         KeSetEvent(&session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
-    if (!KeInsertQueueDpc(
-            &session->ReaderResubmitDpc,
-            session,
-            NULL)) {
+    /* Resubmit from a DPC to avoid recursion in the completion path. */
+    if (!KeInsertQueueDpc(&session->ReaderResubmitDpc, session, NULL)) {
         session->ReaderStatus = STATUS_DEVICE_BUSY;
         KeSetEvent(&session->ReaderStoppedEvent, IO_NO_INCREMENT, FALSE);
     }
+}
+
+static
+VOID
+Ssap3DeleteReader(
+    _Inout_ PSSAP3_SESSION_ENTRY Session
+    )
+{
+    if (Session->ReaderRequest != NULL) {
+        WdfObjectDelete(Session->ReaderRequest);
+    }
+
+    Session->ReaderRequest = NULL;
+    Session->ReaderBufferMemory = NULL;
+    Session->ReaderBrbMemory = NULL;
 }
 
 static
@@ -416,28 +430,20 @@ Ssap3StartContinuousReader(
     Session->ReaderBufferMemory = NULL;
     Session->ReaderBrbMemory = NULL;
     Session->ReaderStopping = 0;
-    Session->ReaderStarted = 0;
+    Session->ReaderInFlight = 0;
     Session->ReaderStatus = STATUS_SUCCESS;
     Session->PacketQueueHead = 0;
     Session->PacketQueueTail = 0;
     Session->PacketQueueCount = 0;
     KeInitializeSpinLock(&Session->PacketLock);
-    KeInitializeEvent(
-        &Session->ReaderStoppedEvent,
-        NotificationEvent,
-        TRUE);
-    KeInitializeDpc(
-        &Session->ReaderResubmitDpc,
-        Ssap3ReaderResubmitDpc,
-        Device);
+    KeInitializeEvent(&Session->ReaderStoppedEvent, NotificationEvent, TRUE);
+    KeInitializeDpc(&Session->ReaderResubmitDpc, Ssap3ReaderResubmitDpc, Device);
 
     WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     attributes.ParentObject = Device;
-    status = WdfRequestCreate(
-        &attributes,
-        WdfDeviceGetIoTarget(Device),
-        &Session->ReaderRequest);
+    status = WdfRequestCreate(&attributes, WdfDeviceGetIoTarget(Device), &Session->ReaderRequest);
     if (!NT_SUCCESS(status)) {
+        Session->ReaderRequest = NULL;
         return status;
     }
 
@@ -451,8 +457,7 @@ Ssap3StartContinuousReader(
         &Session->ReaderBufferMemory,
         NULL);
     if (!NT_SUCCESS(status)) {
-        WdfObjectDelete(Session->ReaderRequest);
-        Session->ReaderRequest = NULL;
+        Ssap3DeleteReader(Session);
         return status;
     }
 
@@ -465,48 +470,73 @@ Ssap3StartContinuousReader(
         sizeof(Session->ReaderBrb),
         &Session->ReaderBrbMemory);
     if (!NT_SUCCESS(status)) {
-        WdfObjectDelete(Session->ReaderRequest);
-        Session->ReaderRequest = NULL;
-        Session->ReaderBufferMemory = NULL;
+        Ssap3DeleteReader(Session);
         return status;
     }
 
     status = Ssap3SubmitContinuousRead(Device, Session);
     if (!NT_SUCCESS(status)) {
-        WdfObjectDelete(Session->ReaderRequest);
-        Session->ReaderRequest = NULL;
-        Session->ReaderBufferMemory = NULL;
-        Session->ReaderBrbMemory = NULL;
+        /* A failed first submission never reached the target: nothing is in flight. */
+        Ssap3DeleteReader(Session);
     }
 
     return status;
 }
 
+/*
+ * Requests the reader to stop and waits a bounded time for it. Returns TRUE
+ * when no read is in flight and no resubmit DPC can still run. PASSIVE_LEVEL.
+ */
 static
-VOID
+BOOLEAN
 Ssap3StopContinuousReader(
-    PSSAP3_SESSION_ENTRY Session
+    _Inout_ PSSAP3_SESSION_ENTRY Session
     )
 {
+    LARGE_INTEGER timeout;
+    NTSTATUS waitStatus;
+
     if (Session->ReaderRequest == NULL) {
-        return;
+        return TRUE;
     }
 
     InterlockedExchange(&Session->ReaderStopping, 1);
-    if (InterlockedCompareExchange(&Session->ReaderStarted, 0, 0) != 0) {
+    if (InterlockedCompareExchange(&Session->ReaderInFlight, 0, 0) != 0) {
         (VOID)WdfRequestCancelSentRequest(Session->ReaderRequest);
     }
 
-    KeWaitForSingleObject(
-        &Session->ReaderStoppedEvent,
-        Executive,
-        KernelMode,
-        FALSE,
-        NULL);
-    WdfObjectDelete(Session->ReaderRequest);
-    Session->ReaderRequest = NULL;
-    Session->ReaderBufferMemory = NULL;
-    Session->ReaderBrbMemory = NULL;
+    timeout.QuadPart = WDF_REL_TIMEOUT_IN_MS(SSAP3_READER_STOP_TIMEOUT_MS);
+    waitStatus = KeWaitForSingleObject(&Session->ReaderStoppedEvent, Executive, KernelMode, FALSE, &timeout);
+
+    /* A resubmit DPC may be running on another processor: let it finish. */
+    KeFlushQueuedDpcs();
+
+    return waitStatus == STATUS_SUCCESS &&
+        InterlockedCompareExchange(&Session->ReaderInFlight, 0, 0) == 0;
+}
+
+static
+BOOLEAN
+Ssap3HasProfileInterface(
+    _In_ PSSAP3_DEVICE_CONTEXT DeviceContext
+    )
+{
+    return DeviceContext->HasProfileDriverInterface &&
+        DeviceContext->ProfileDriverInterface.BthInitializeBrb != NULL &&
+        DeviceContext->ProfileDriverInterface.BthReuseBrb != NULL;
+}
+
+static
+BOOLEAN
+Ssap3HasUsableProfileInterface(
+    _In_ PSSAP3_DEVICE_CONTEXT DeviceContext
+    )
+{
+    return Ssap3HasProfileInterface(DeviceContext) &&
+        DeviceContext->HasRemoteDeviceInfo &&
+        DeviceContext->HasAacpEnumeratorInfo &&
+        DeviceContext->AacpPort != 0 &&
+        DeviceContext->AacpPort <= 0xffffu;
 }
 
 static
@@ -527,19 +557,6 @@ Ssap3PopulateDefaultOpenConfig(
     OpenChannelBrb->ConfigIn.Mtu.Preferred = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
     OpenChannelBrb->ConfigIn.Mtu.Max = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
     OpenChannelBrb->IncomingQueueDepth = 50;
-}
-
-static
-BOOLEAN
-Ssap3HasUsableProfileInterface(
-    _In_ PSSAP3_DEVICE_CONTEXT DeviceContext
-    )
-{
-    return DeviceContext->HasProfileDriverInterface &&
-        DeviceContext->HasAacpEnumeratorInfo &&
-        DeviceContext->AacpPort != 0 &&
-        DeviceContext->AacpPort <= 0xffffu &&
-        DeviceContext->ProfileDriverInterface.BthInitializeBrb != NULL;
 }
 
 _Use_decl_annotations_
@@ -578,71 +595,66 @@ Ssap3TransportOpenSession(
     )
 {
     PSSAP3_DEVICE_CONTEXT deviceContext;
+    BTH_ADDR requestedAddress;
     BRB brb;
     NTSTATUS status;
 
+    *Mtu = 0;
+    *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
+    Session->ChannelHandle = NULL;
+    Session->ReaderRequest = NULL;
+
     deviceContext = Ssap3GetDeviceContext(Device);
     if (!Ssap3HasUsableProfileInterface(deviceContext)) {
-        *Mtu = 0;
-        *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
         *DriverError = SSAP3_DRIVER_ERROR_TRANSPORT_BLOCKED;
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (deviceContext->HasRemoteDeviceInfo) {
-        Session->RemoteAddress = deviceContext->RemoteDeviceInfo.address;
-    } else {
-        status = Ssap3ParseBluetoothAddress(Session->BluetoothAddress, &Session->RemoteAddress);
-        if (!NT_SUCCESS(status)) {
-            *Mtu = 0;
-            *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
-            *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
-            return status;
-        }
+    /* S-08: the channel always targets this PDO's own device. The caller's
+     * address only selects between PDOs and must match. */
+    status = Ssap3ParseBluetoothAddress(Session->BluetoothAddress, &requestedAddress);
+    if (!NT_SUCCESS(status)) {
+        *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
+        return status;
     }
+
+    if (requestedAddress != deviceContext->RemoteDeviceInfo.address) {
+        *DriverError = SSAP3_DRIVER_ERROR_ADDRESS_MISMATCH;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Session->RemoteAddress = deviceContext->RemoteDeviceInfo.address;
 
     RtlZeroMemory(&brb, sizeof(brb));
     deviceContext->ProfileDriverInterface.BthInitializeBrb(&brb, BRB_L2CA_OPEN_CHANNEL);
-
     brb.BrbL2caOpenChannel.ChannelHandle = NULL;
     brb.BrbL2caOpenChannel.Psm = (USHORT)deviceContext->AacpPort;
     brb.BrbL2caOpenChannel.BtAddress = Session->RemoteAddress;
     Ssap3PopulateDefaultOpenConfig(&brb.BrbL2caOpenChannel);
 
-    status = Ssap3SubmitBrbSynchronously(Device, &brb);
+    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_OPEN_CHANNEL_TIMEOUT_MS);
     if (!NT_SUCCESS(status)) {
-        Session->ChannelHandle = NULL;
-        *Mtu = 0;
-        *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
     }
 
     if (brb.BrbL2caOpenChannel.ChannelHandle == NULL) {
-        Session->ChannelHandle = NULL;
-        *Mtu = 0;
-        *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
         *DriverError = SSAP3_DRIVER_ERROR_INTERNAL;
         return STATUS_UNSUCCESSFUL;
     }
 
     Session->ChannelHandle = brb.BrbL2caOpenChannel.ChannelHandle;
-    Session->LastPacketLength = 0;
 
     status = Ssap3StartContinuousReader(Device, Session);
     if (!NT_SUCCESS(status)) {
         BRB closeBrb;
 
         RtlZeroMemory(&closeBrb, sizeof(closeBrb));
-        deviceContext->ProfileDriverInterface.BthInitializeBrb(
-            &closeBrb,
-            BRB_L2CA_CLOSE_CHANNEL);
+        deviceContext->ProfileDriverInterface.BthInitializeBrb(&closeBrb, BRB_L2CA_CLOSE_CHANNEL);
         closeBrb.BrbL2caCloseChannel.BtAddress = Session->RemoteAddress;
         closeBrb.BrbL2caCloseChannel.ChannelHandle = Session->ChannelHandle;
-        (VOID)Ssap3SubmitBrbSynchronously(Device, &closeBrb);
+        (VOID)Ssap3SubmitBrbSynchronously(Device, &closeBrb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS);
         Session->ChannelHandle = NULL;
-        *Mtu = 0;
-        *CapabilityFlags = SSAP3_DRIVER_CAPABILITY_NONE;
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
     }
@@ -663,45 +675,47 @@ NTSTATUS
 Ssap3TransportCloseSession(
     WDFDEVICE Device,
     PSSAP3_SESSION_ENTRY Session,
+    BOOLEAN* CanFree,
     ULONG* DriverError
     )
 {
     PSSAP3_DEVICE_CONTEXT deviceContext;
-    BRB brb;
+    BOOLEAN readerStopped;
     NTSTATUS status;
 
-    if (Session->ChannelHandle == NULL) {
-        Ssap3StopContinuousReader(Session);
-        *DriverError = SSAP3_DRIVER_ERROR_NONE;
-        return STATUS_SUCCESS;
-    }
-
+    *CanFree = FALSE;
+    *DriverError = SSAP3_DRIVER_ERROR_NONE;
+    status = STATUS_SUCCESS;
     deviceContext = Ssap3GetDeviceContext(Device);
-    if (!Ssap3HasUsableProfileInterface(deviceContext)) {
-        Ssap3StopContinuousReader(Session);
-        Session->ChannelHandle = NULL;
-        *DriverError = SSAP3_DRIVER_ERROR_NONE;
-        return STATUS_SUCCESS;
+
+    readerStopped = Ssap3StopContinuousReader(Session);
+
+    if (Session->ChannelHandle != NULL && Ssap3HasProfileInterface(deviceContext)) {
+        BRB brb;
+
+        RtlZeroMemory(&brb, sizeof(brb));
+        deviceContext->ProfileDriverInterface.BthInitializeBrb(&brb, BRB_L2CA_CLOSE_CHANNEL);
+        brb.BrbL2caCloseChannel.BtAddress = Session->RemoteAddress;
+        brb.BrbL2caCloseChannel.ChannelHandle = Session->ChannelHandle;
+        status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS);
+        if (!NT_SUCCESS(status)) {
+            *DriverError = Ssap3MapNtStatusToDriverError(status);
+        }
     }
 
-    Ssap3StopContinuousReader(Session);
-
-    RtlZeroMemory(&brb, sizeof(brb));
-    deviceContext->ProfileDriverInterface.BthInitializeBrb(&brb, BRB_L2CA_CLOSE_CHANNEL);
-
-    brb.BrbL2caCloseChannel.BtAddress = Session->RemoteAddress;
-    brb.BrbL2caCloseChannel.ChannelHandle = Session->ChannelHandle;
-
-    status = Ssap3SubmitBrbSynchronously(Device, &brb);
     Session->ChannelHandle = NULL;
 
-    if (!NT_SUCCESS(status)) {
-        *DriverError = Ssap3MapNtStatusToDriverError(status);
-        return status;
+    if (!readerStopped) {
+        /* Closing the channel fails any transfer still pending; wait once more. */
+        readerStopped = Ssap3StopContinuousReader(Session);
     }
 
-    *DriverError = SSAP3_DRIVER_ERROR_NONE;
-    return STATUS_SUCCESS;
+    if (readerStopped) {
+        Ssap3DeleteReader(Session);
+        *CanFree = TRUE;
+    }
+
+    return status;
 }
 
 _Use_decl_annotations_
@@ -718,7 +732,8 @@ Ssap3TransportSendPacket(
     BRB brb;
     NTSTATUS status;
 
-    if (Session->ChannelHandle == NULL || Packet == NULL || PacketLength == 0) {
+    if (Session->ChannelHandle == NULL || Packet == NULL || PacketLength == 0 ||
+        PacketLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
         *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
         return STATUS_INVALID_PARAMETER;
     }
@@ -731,7 +746,6 @@ Ssap3TransportSendPacket(
 
     RtlZeroMemory(&brb, sizeof(brb));
     deviceContext->ProfileDriverInterface.BthInitializeBrb(&brb, BRB_L2CA_ACL_TRANSFER);
-
     brb.BrbL2caAclTransfer.BtAddress = Session->RemoteAddress;
     brb.BrbL2caAclTransfer.ChannelHandle = Session->ChannelHandle;
     brb.BrbL2caAclTransfer.TransferFlags = ACL_TRANSFER_DIRECTION_OUT;
@@ -740,7 +754,7 @@ Ssap3TransportSendPacket(
     brb.BrbL2caAclTransfer.BufferMDL = NULL;
     brb.BrbL2caAclTransfer.Timeout = 0;
 
-    status = Ssap3SubmitBrbSynchronously(Device, &brb);
+    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_SEND_PACKET_TIMEOUT_MS);
     if (!NT_SUCCESS(status)) {
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
@@ -763,6 +777,7 @@ Ssap3TransportReadPacket(
     UCHAR* PacketBuffer,
     ULONG PacketBufferLength,
     ULONG* PacketLength,
+    ULONGLONG* ReceiveInterruptTime,
     ULONG* DriverError
     )
 {
@@ -770,37 +785,84 @@ Ssap3TransportReadPacket(
     ULONG availableLength;
     ULONG slot;
 
+    UNREFERENCED_PARAMETER(Device);
+    *PacketLength = 0;
+    *ReceiveInterruptTime = 0;
+
     if (Session->ChannelHandle == NULL || PacketBuffer == NULL || PacketBufferLength == 0) {
-        *PacketLength = 0;
         *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
         return STATUS_INVALID_PARAMETER;
     }
 
-    UNREFERENCED_PARAMETER(Device);
     KeAcquireSpinLock(&Session->PacketLock, &oldIrql);
     if (Session->PacketQueueCount == 0) {
         KeReleaseSpinLock(&Session->PacketLock, oldIrql);
-        *PacketLength = 0;
+
+        /* Report a dead channel instead of returning "no data" forever. */
+        if (!NT_SUCCESS(Session->ReaderStatus) &&
+            InterlockedCompareExchange(&Session->ReaderInFlight, 0, 0) == 0) {
+            *DriverError = SSAP3_DRIVER_ERROR_DISCONNECTED;
+            return STATUS_CONNECTION_DISCONNECTED;
+        }
+
         *DriverError = SSAP3_DRIVER_ERROR_NONE;
         return STATUS_SUCCESS;
     }
 
     slot = Session->PacketQueueHead;
     availableLength = Session->PacketQueueLengths[slot];
-    if (availableLength > PacketBufferLength) {
+    if (availableLength > PacketBufferLength || availableLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
         KeReleaseSpinLock(&Session->PacketLock, oldIrql);
-        *PacketLength = 0;
         *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
         return STATUS_BUFFER_TOO_SMALL;
     }
 
     RtlCopyMemory(PacketBuffer, Session->PacketQueue[slot], availableLength);
-    Session->PacketQueueHead =
-        (Session->PacketQueueHead + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
+    *ReceiveInterruptTime = Session->PacketQueueTimes[slot];
+    Session->PacketQueueHead = (Session->PacketQueueHead + 1u) % SSAP3_PACKET_QUEUE_DEPTH;
     Session->PacketQueueCount--;
     KeReleaseSpinLock(&Session->PacketLock, oldIrql);
 
     *PacketLength = availableLength;
     *DriverError = SSAP3_DRIVER_ERROR_NONE;
     return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+BOOLEAN
+Ssap3IsAllowedOutboundPacket(
+    const UCHAR* Packet,
+    ULONG PacketLength
+    )
+{
+    USHORT opcode;
+
+    if (Packet == NULL || PacketLength < 6 || PacketLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        return FALSE;
+    }
+
+    /* Session handshake: 00 00 04 00 01 00 ... */
+    if (Packet[0] == 0x00 && Packet[1] == 0x00 && Packet[2] == 0x04 && Packet[3] == 0x00) {
+        return Packet[4] == 0x01 && Packet[5] == 0x00;
+    }
+
+    if (Packet[0] != 0x04 || Packet[1] != 0x00 || Packet[2] != 0x04 || Packet[3] != 0x00) {
+        return FALSE;
+    }
+
+    opcode = (USHORT)(Packet[4] | (Packet[5] << 8));
+    switch (opcode) {
+        case 0x0009:
+            /* Control commands: owns-connection, listening mode, conversational awareness. */
+            return PacketLength >= 7 &&
+                (Packet[6] == 0x06 || Packet[6] == 0x0D || Packet[6] == 0x28);
+
+        case 0x000F: /* notification request */
+        case 0x0017: /* head-tracking stream control */
+        case 0x004D: /* feature flags */
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
 }

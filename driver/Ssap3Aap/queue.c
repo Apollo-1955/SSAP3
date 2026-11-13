@@ -1,3 +1,10 @@
+/*
+ * SSAP3 AAP profile driver: IOCTL dispatch.
+ *
+ * All IOCTLs are METHOD_BUFFERED. Input and output can alias the same system
+ * buffer, so every input field needed after the output is written is copied
+ * first. Every length and identifier is validated before use.
+ */
 #include "driver.h"
 #include "transport.h"
 
@@ -23,12 +30,7 @@ Ssap3HandleGetBridgeStatus(
     ssap3_driver_status* output;
     NTSTATUS status;
 
-    status = WdfRequestRetrieveOutputBuffer(
-        Request,
-        sizeof(ssap3_driver_status),
-        (PVOID*)&output,
-        NULL);
-
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ssap3_driver_status), (PVOID*)&output, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -40,10 +42,13 @@ Ssap3HandleGetBridgeStatus(
     output->capability_flags = deviceContext->CapabilityFlags;
     output->max_packet_size = deviceContext->MaxPacketSize;
     output->last_error = deviceContext->LastError;
-    output->reserved0 = deviceContext->InitializationFlags;
-    output->reserved1 =
+    output->initialization_flags = deviceContext->InitializationFlags;
+    output->initialization_result =
         ((ssap3_u64)deviceContext->InitializationFailureStage << 32) |
         (ssap3_u32)deviceContext->InitializationStatus;
+    output->remote_address = deviceContext->HasRemoteDeviceInfo
+        ? (ssap3_u64)deviceContext->RemoteDeviceInfo.address
+        : 0;
 
     Ssap3CompleteRequest(Request, STATUS_SUCCESS, sizeof(*output));
     return STATUS_SUCCESS;
@@ -62,15 +67,11 @@ Ssap3HandleOpenSession(
     PSSAP3_SESSION_ENTRY session;
     PSSAP3_FILE_CONTEXT fileContext;
     WDFFILEOBJECT ownerFile;
-    size_t inputLength;
+    CHAR requestedAddress[SSAP3_DRIVER_MAX_BLUETOOTH_ADDRESS_LENGTH];
     NTSTATUS status;
 
-    status = WdfRequestRetrieveInputBuffer(
-        Request,
-        sizeof(ssap3_driver_open_session_request),
-        (PVOID*)&input,
-        &inputLength);
-
+    deviceContext = Ssap3GetDeviceContext(Device);
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(ssap3_driver_open_session_request), (PVOID*)&input, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -82,43 +83,33 @@ Ssap3HandleOpenSession(
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = WdfRequestRetrieveOutputBuffer(
-        Request,
-        sizeof(ssap3_driver_open_session_response),
-        (PVOID*)&output,
-        NULL);
+    /* Copy before the (possibly aliased) output buffer is written. */
+    RtlCopyMemory(requestedAddress, input->bluetooth_address, sizeof(requestedAddress));
 
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ssap3_driver_open_session_response), (PVOID*)&output, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    session = (PSSAP3_SESSION_ENTRY)ExAllocatePoolZero(
-        NonPagedPoolNx,
-        sizeof(SSAP3_SESSION_ENTRY),
-        SSAP3_SESSION_POOL_TAG);
+    ownerFile = WdfRequestGetFileObject(Request);
+    if (ownerFile == NULL) {
+        return STATUS_FILE_CLOSED;
+    }
 
+    fileContext = Ssap3GetFileContext(ownerFile);
+
+    session = (PSSAP3_SESSION_ENTRY)ExAllocatePoolZero(NonPagedPoolNx, sizeof(SSAP3_SESSION_ENTRY), SSAP3_SESSION_POOL_TAG);
     if (session == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ownerFile = WdfRequestGetFileObject(Request);
-    if (ownerFile == NULL) {
-        ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
-        return STATUS_FILE_CLOSED;
-    }
-
-    status = RtlStringCbCopyA(
-        session->BluetoothAddress,
-        sizeof(session->BluetoothAddress),
-        input->bluetooth_address);
+    status = RtlStringCbCopyA(session->BluetoothAddress, sizeof(session->BluetoothAddress), requestedAddress);
     if (!NT_SUCCESS(status)) {
         ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_INVALID_PARAMETER;
     }
 
-    deviceContext = Ssap3GetDeviceContext(Device);
-    fileContext = Ssap3GetFileContext(ownerFile);
     session->OwnerFile = ownerFile;
 
     WdfWaitLockAcquire(deviceContext->SessionLock, NULL);
@@ -128,16 +119,21 @@ Ssap3HandleOpenSession(
         return STATUS_FILE_CLOSED;
     }
 
-    session->SessionId = deviceContext->NextSessionId++;
-    status = Ssap3TransportOpenSession(
-        Device,
-        session,
-        &session->CapabilityFlags,
-        &session->Mtu,
-        &deviceContext->LastError);
+    /* S-05: bounded sessions per handle and per device. */
+    if (fileContext->SessionCount >= SSAP3_DRIVER_MAX_SESSIONS_PER_HANDLE ||
+        deviceContext->SessionCount >= SSAP3_DRIVER_MAX_SESSIONS_PER_DEVICE) {
+        WdfWaitLockRelease(deviceContext->SessionLock);
+        ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
+        Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_SESSION_LIMIT);
+        return STATUS_QUOTA_EXCEEDED;
+    }
 
+    session->SessionId = deviceContext->NextSessionId++;
+    status = Ssap3TransportOpenSession(Device, session, &session->CapabilityFlags, &session->Mtu, &deviceContext->LastError);
     if (NT_SUCCESS(status)) {
         InsertTailList(&deviceContext->Sessions, &session->ListEntry);
+        deviceContext->SessionCount++;
+        fileContext->SessionCount++;
         RtlZeroMemory(output, sizeof(*output));
         output->struct_size = sizeof(*output);
         output->capability_flags = session->CapabilityFlags;
@@ -147,6 +143,7 @@ Ssap3HandleOpenSession(
     WdfWaitLockRelease(deviceContext->SessionLock);
 
     if (!NT_SUCCESS(status)) {
+        /* A failed open never left a read in flight (see Ssap3StartContinuousReader). */
         ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
         return status;
     }
@@ -166,15 +163,9 @@ Ssap3HandleCloseSession(
     ssap3_driver_close_session_request* input;
     PSSAP3_SESSION_ENTRY session;
     WDFFILEOBJECT ownerFile;
-    BOOLEAN foundSession;
     NTSTATUS status;
 
-    status = WdfRequestRetrieveInputBuffer(
-        Request,
-        sizeof(ssap3_driver_close_session_request),
-        (PVOID*)&input,
-        NULL);
-
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(ssap3_driver_close_session_request), (PVOID*)&input, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -191,22 +182,16 @@ Ssap3HandleCloseSession(
     }
 
     WdfWaitLockAcquire(deviceContext->SessionLock, NULL);
-    foundSession = FALSE;
     session = Ssap3FindSessionLocked(deviceContext, input->session_id);
-    if (session != NULL && session->OwnerFile == ownerFile) {
-        foundSession = TRUE;
-        RemoveEntryList(&session->ListEntry);
-        status = Ssap3TransportCloseSession(Device, session, &deviceContext->LastError);
-        ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
-    } else {
-        status = STATUS_NOT_FOUND;
-    }
-    WdfWaitLockRelease(deviceContext->SessionLock);
-
-    if (!foundSession) {
+    if (session == NULL || session->OwnerFile != ownerFile) {
+        WdfWaitLockRelease(deviceContext->SessionLock);
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_NOT_FOUND;
     }
+
+    RemoveEntryList(&session->ListEntry);
+    status = Ssap3DestroySessionLocked(Device, session);
+    WdfWaitLockRelease(deviceContext->SessionLock);
 
     if (!NT_SUCCESS(status)) {
         return status;
@@ -229,6 +214,7 @@ Ssap3HandleSendPacket(
     WDFFILEOBJECT ownerFile;
     size_t inputLength;
     size_t requiredLength;
+    ULONG packetLength;
     NTSTATUS status;
 
     status = WdfRequestRetrieveInputBuffer(
@@ -236,23 +222,29 @@ Ssap3HandleSendPacket(
         FIELD_OFFSET(ssap3_driver_send_packet_request, packet),
         (PVOID*)&input,
         &inputLength);
-
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    if (input->struct_size < sizeof(*input) ||
+    packetLength = input->packet_length;
+    if (input->struct_size < FIELD_OFFSET(ssap3_driver_send_packet_request, packet) ||
         input->session_id == 0 ||
-        input->packet_length == 0 ||
-        input->packet_length > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        packetLength == 0 ||
+        packetLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_INVALID_PARAMETER;
     }
 
-    requiredLength = FIELD_OFFSET(ssap3_driver_send_packet_request, packet) + input->packet_length;
+    requiredLength = FIELD_OFFSET(ssap3_driver_send_packet_request, packet) + (size_t)packetLength;
     if (inputLength < requiredLength) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* S-09: only the AACP framing SSAP3 itself sends is forwarded. */
+    if (!Ssap3IsAllowedOutboundPacket(input->packet, packetLength)) {
+        Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_PACKET_REJECTED);
+        return STATUS_ACCESS_DENIED;
     }
 
     deviceContext = Ssap3GetDeviceContext(Device);
@@ -269,19 +261,16 @@ Ssap3HandleSendPacket(
         return STATUS_NOT_FOUND;
     }
 
-    status = Ssap3TransportSendPacket(
-        Device,
-        session,
-        input->packet,
-        (ULONG)input->packet_length,
-        &deviceContext->LastError);
+    status = Ssap3TransportSendPacket(Device, session, input->packet, packetLength, &deviceContext->LastError);
     WdfWaitLockRelease(deviceContext->SessionLock);
 
-    if (NT_SUCCESS(status)) {
-        Ssap3CompleteRequest(Request, STATUS_SUCCESS, 0);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    return status;
+    /* Normalise informational codes so the dispatcher never completes twice. */
+    Ssap3CompleteRequest(Request, STATUS_SUCCESS, 0);
+    return STATUS_SUCCESS;
 }
 
 static
@@ -299,14 +288,10 @@ Ssap3HandleReadPacket(
     ssap3_u64 sessionId;
     ULONG packetBufferLength;
     ULONG packetLength;
+    ULONGLONG receiveTime;
     NTSTATUS status;
 
-    status = WdfRequestRetrieveInputBuffer(
-        Request,
-        sizeof(ssap3_driver_read_packet_request),
-        (PVOID*)&input,
-        NULL);
-
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(ssap3_driver_read_packet_request), (PVOID*)&input, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -319,20 +304,11 @@ Ssap3HandleReadPacket(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /*
-     * These IOCTLs use METHOD_BUFFERED, so the input and output pointers can
-     * alias the same system buffer. Preserve every input field needed after
-     * the output buffer is cleared.
-     */
+    /* Input and output can alias: keep the fields needed after clearing output. */
     sessionId = input->session_id;
     packetBufferLength = (ULONG)input->packet_buffer_length;
 
-    status = WdfRequestRetrieveOutputBuffer(
-        Request,
-        sizeof(ssap3_driver_read_packet_response),
-        (PVOID*)&output,
-        NULL);
-
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ssap3_driver_read_packet_response), (PVOID*)&output, NULL);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -353,13 +329,13 @@ Ssap3HandleReadPacket(
 
     RtlZeroMemory(output, sizeof(*output));
     output->struct_size = sizeof(*output);
-
     status = Ssap3TransportReadPacket(
         Device,
         session,
         output->packet,
         packetBufferLength,
         &packetLength,
+        &receiveTime,
         &deviceContext->LastError);
     WdfWaitLockRelease(deviceContext->SessionLock);
 
@@ -368,10 +344,8 @@ Ssap3HandleReadPacket(
     }
 
     output->packet_length = packetLength;
-    Ssap3CompleteRequest(
-        Request,
-        STATUS_SUCCESS,
-        FIELD_OFFSET(ssap3_driver_read_packet_response, packet) + packetLength);
+    output->receive_interrupt_time = receiveTime;
+    Ssap3CompleteRequest(Request, STATUS_SUCCESS, FIELD_OFFSET(ssap3_driver_read_packet_response, packet) + packetLength);
     return STATUS_SUCCESS;
 }
 
@@ -392,7 +366,6 @@ Ssap3EvtIoDeviceControl(
     UNREFERENCED_PARAMETER(InputBufferLength);
 
     device = WdfIoQueueGetDevice(Queue);
-    status = STATUS_INVALID_DEVICE_REQUEST;
 
     switch (IoControlCode) {
         case SSAP3_IOCTL_GET_BRIDGE_STATUS:

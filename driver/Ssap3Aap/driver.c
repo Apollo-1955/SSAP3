@@ -1,8 +1,13 @@
+/*
+ * SSAP3 AAP profile driver: device setup, PnP, and session lifetime.
+ * Adapted from the GPL-3.0 LibrePods Windows KMDF bridge; hardened for SSAP3.
+ */
 #include "driver.h"
 #include "transport.h"
 
+/* {1C3A8128-3668-4428-95A4-B1CAD51B7249}: SSAP3-specific interface (protocol v2). */
 static const GUID GUID_DEVINTERFACE_SSAP3_DRIVER = {
-    0x3e98d13a, 0xb2a5, 0x4c3d, {0xae, 0x1e, 0x8d, 0xb4, 0xf3, 0xd8, 0xc1, 0xf0}
+    0x1c3a8128, 0x3668, 0x4428, {0x95, 0xa4, 0xb1, 0xca, 0xd5, 0x1b, 0x72, 0x49}
 };
 
 static const GUID GUID_BTHDDI_PROFILE_DRIVER_INTERFACE = {
@@ -14,6 +19,7 @@ static const GUID GUID_SSAP3_AAP_SERVER = {
 };
 
 #define SSAP3_AACP_PSM ((ULONG)0x1001)
+#define SSAP3_QUERY_TIMEOUT_MS 5000
 
 static
 VOID
@@ -34,12 +40,37 @@ Ssap3UseKnownAacpPsm(
 
 static
 NTSTATUS
+Ssap3SendQuerySynchronously(
+    _In_ WDFDEVICE Device,
+    _In_ ULONG IoControlCode,
+    _Out_writes_bytes_(OutputLength) PVOID Output,
+    _In_ ULONG OutputLength
+    )
+{
+    WDF_MEMORY_DESCRIPTOR outputDescriptor;
+    WDF_REQUEST_SEND_OPTIONS sendOptions;
+
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&outputDescriptor, Output, OutputLength);
+    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(SSAP3_QUERY_TIMEOUT_MS));
+
+    return WdfIoTargetSendInternalIoctlSynchronously(
+        WdfDeviceGetIoTarget(Device),
+        WDF_NO_HANDLE,
+        IoControlCode,
+        NULL,
+        &outputDescriptor,
+        &sendOptions,
+        NULL);
+}
+
+static
+NTSTATUS
 Ssap3QueryRemoteDeviceInfo(
     _In_ WDFDEVICE Device
     )
 {
     PSSAP3_DEVICE_CONTEXT deviceContext;
-    WDF_MEMORY_DESCRIPTOR outputDescriptor;
     BTH_DEVICE_INFO remoteDeviceInfo;
     NTSTATUS status;
 
@@ -48,23 +79,17 @@ Ssap3QueryRemoteDeviceInfo(
     deviceContext->HasRemoteDeviceInfo = FALSE;
     RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
 
-    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(
-        &outputDescriptor,
+    status = Ssap3SendQuerySynchronously(
+        Device,
+        IOCTL_INTERNAL_BTHENUM_GET_DEVINFO,
         &remoteDeviceInfo,
         sizeof(remoteDeviceInfo));
 
-    status = WdfIoTargetSendInternalIoctlSynchronously(
-        WdfDeviceGetIoTarget(Device),
-        WDF_NO_HANDLE,
-        IOCTL_INTERNAL_BTHENUM_GET_DEVINFO,
-        NULL,
-        &outputDescriptor,
-        NULL,
-        NULL);
-
-    if (NT_SUCCESS(status)) {
+    if (NT_SUCCESS(status) && remoteDeviceInfo.address != 0) {
         deviceContext->RemoteDeviceInfo = remoteDeviceInfo;
         deviceContext->HasRemoteDeviceInfo = TRUE;
+    } else if (NT_SUCCESS(status)) {
+        status = STATUS_DEVICE_DATA_ERROR;
     }
 
     return status;
@@ -77,7 +102,6 @@ Ssap3QueryAacpEnumeratorInfo(
     )
 {
     PSSAP3_DEVICE_CONTEXT deviceContext;
-    WDF_MEMORY_DESCRIPTOR outputDescriptor;
     BTH_ENUMERATOR_INFO enumeratorInfo;
     NTSTATUS status;
 
@@ -86,29 +110,19 @@ Ssap3QueryAacpEnumeratorInfo(
     deviceContext->HasAacpEnumeratorInfo = FALSE;
     deviceContext->AacpPort = 0;
 
-    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(
-        &outputDescriptor,
+    status = Ssap3SendQuerySynchronously(
+        Device,
+        IOCTL_INTERNAL_BTHENUM_GET_ENUMINFO,
         &enumeratorInfo,
         sizeof(enumeratorInfo));
-
-    status = WdfIoTargetSendInternalIoctlSynchronously(
-        WdfDeviceGetIoTarget(Device),
-        WDF_NO_HANDLE,
-        IOCTL_INTERNAL_BTHENUM_GET_ENUMINFO,
-        NULL,
-        &outputDescriptor,
-        NULL,
-        NULL);
 
     if (!NT_SUCCESS(status)) {
         Ssap3UseKnownAacpPsm(deviceContext, status);
         return STATUS_SUCCESS;
     }
 
-    if (RtlCompareMemory(
-            &enumeratorInfo.Guid,
-            &GUID_SSAP3_AAP_SERVER,
-            sizeof(GUID)) != sizeof(GUID)) {
+    /* The UARP PDO reports its own service GUID: fall back to the known AACP PSM. */
+    if (RtlCompareMemory(&enumeratorInfo.Guid, &GUID_SSAP3_AAP_SERVER, sizeof(GUID)) != sizeof(GUID)) {
         Ssap3UseKnownAacpPsm(deviceContext, STATUS_NOT_SUPPORTED);
         return STATUS_SUCCESS;
     }
@@ -123,6 +137,48 @@ Ssap3QueryAacpEnumeratorInfo(
     return STATUS_SUCCESS;
 }
 
+_Use_decl_annotations_
+NTSTATUS
+Ssap3DestroySessionLocked(
+    WDFDEVICE Device,
+    PSSAP3_SESSION_ENTRY Session
+    )
+{
+    PSSAP3_DEVICE_CONTEXT deviceContext;
+    BOOLEAN canFree;
+    ULONG driverError;
+    NTSTATUS status;
+
+    deviceContext = Ssap3GetDeviceContext(Device);
+    canFree = FALSE;
+    driverError = SSAP3_DRIVER_ERROR_NONE;
+    status = Ssap3TransportCloseSession(Device, Session, &canFree, &driverError);
+    deviceContext->LastError = driverError;
+
+    if (deviceContext->SessionCount > 0) {
+        deviceContext->SessionCount--;
+    }
+
+    if (Session->OwnerFile != NULL) {
+        PSSAP3_FILE_CONTEXT fileContext;
+
+        fileContext = Ssap3GetFileContext(Session->OwnerFile);
+        if (fileContext->SessionCount > 0) {
+            fileContext->SessionCount--;
+        }
+        Session->OwnerFile = NULL;
+    }
+
+    if (canFree) {
+        ExFreePoolWithTag(Session, SSAP3_SESSION_POOL_TAG);
+    } else {
+        /* A read might still complete into this memory: park it until device cleanup. */
+        InsertTailList(&deviceContext->ZombieSessions, &Session->ListEntry);
+    }
+
+    return status;
+}
+
 static
 VOID
 Ssap3CloseAllSessions(
@@ -132,7 +188,6 @@ Ssap3CloseAllSessions(
     PSSAP3_DEVICE_CONTEXT deviceContext;
 
     deviceContext = Ssap3GetDeviceContext(Device);
-
     if (deviceContext->SessionLock == NULL) {
         return;
     }
@@ -140,16 +195,31 @@ Ssap3CloseAllSessions(
     WdfWaitLockAcquire(deviceContext->SessionLock, NULL);
     while (!IsListEmpty(&deviceContext->Sessions)) {
         PSSAP3_SESSION_ENTRY session;
-        ULONG driverError;
         PLIST_ENTRY listEntry;
 
         listEntry = RemoveHeadList(&deviceContext->Sessions);
         session = CONTAINING_RECORD(listEntry, SSAP3_SESSION_ENTRY, ListEntry);
-        driverError = SSAP3_DRIVER_ERROR_NONE;
-        Ssap3TransportCloseSession(Device, session, &driverError);
-        ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
+        (VOID)Ssap3DestroySessionLocked(Device, session);
     }
     WdfWaitLockRelease(deviceContext->SessionLock);
+}
+
+static
+VOID
+Ssap3FreeZombieSessions(
+    _Inout_ PSSAP3_DEVICE_CONTEXT DeviceContext
+    )
+{
+    /* By device cleanup every request parented to the device has completed. */
+    KeFlushQueuedDpcs();
+    while (!IsListEmpty(&DeviceContext->ZombieSessions)) {
+        PLIST_ENTRY listEntry;
+
+        listEntry = RemoveHeadList(&DeviceContext->ZombieSessions);
+        ExFreePoolWithTag(
+            CONTAINING_RECORD(listEntry, SSAP3_SESSION_ENTRY, ListEntry),
+            SSAP3_SESSION_POOL_TAG);
+    }
 }
 
 _Use_decl_annotations_
@@ -160,19 +230,14 @@ DriverEntry(
     )
 {
     WDF_DRIVER_CONFIG config;
-    NTSTATUS status;
+
+    /* Opt in to non-executable pool for every ExAllocatePool2-style allocation. */
+    ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
 
     WDF_DRIVER_CONFIG_INIT(&config, Ssap3EvtDeviceAdd);
     config.DriverPoolTag = SSAP3_DRIVER_POOL_TAG;
 
-    status = WdfDriverCreate(
-        DriverObject,
-        RegistryPath,
-        WDF_NO_OBJECT_ATTRIBUTES,
-        &config,
-        WDF_NO_HANDLE);
-
-    return status;
+    return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
 }
 
 _Use_decl_annotations_
@@ -208,11 +273,7 @@ Ssap3CreateDevice(
     WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
     WdfDeviceInitSetCharacteristics(DeviceInit, FILE_AUTOGENERATED_DEVICE_NAME, FALSE);
 
-    WDF_FILEOBJECT_CONFIG_INIT(
-        &fileConfig,
-        WDF_NO_EVENT_CALLBACK,
-        WDF_NO_EVENT_CALLBACK,
-        Ssap3EvtFileCleanup);
+    WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK, Ssap3EvtFileCleanup);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&fileAttributes, SSAP3_FILE_CONTEXT);
     fileAttributes.ExecutionLevel = WdfExecutionLevelPassive;
     fileAttributes.SynchronizationScope = WdfSynchronizationScopeNone;
@@ -223,7 +284,10 @@ Ssap3CreateDevice(
     pnpPowerCallbacks.EvtDeviceReleaseHardware = Ssap3EvtDeviceReleaseHardware;
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
-    RtlInitUnicodeString(&securityDescriptor, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;BU)");
+    /* SYSTEM and Administrators: all access; interactive users: read/write
+     * (the SSAP3 Control Center runs as the signed-in user). Services,
+     * network logons and AppContainers get no access. */
+    RtlInitUnicodeString(&securityDescriptor, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)");
     status = WdfDeviceInitAssignSDDLString(DeviceInit, &securityDescriptor);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -240,12 +304,14 @@ Ssap3CreateDevice(
 
     deviceContext = Ssap3GetDeviceContext(device);
     RtlZeroMemory(&deviceContext->ProfileDriverInterface, sizeof(deviceContext->ProfileDriverInterface));
+    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->HasProfileDriverInterface = FALSE;
     deviceContext->HasRemoteDeviceInfo = FALSE;
     deviceContext->HasAacpEnumeratorInfo = FALSE;
-    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->AacpPort = 0;
     InitializeListHead(&deviceContext->Sessions);
+    InitializeListHead(&deviceContext->ZombieSessions);
+    deviceContext->SessionCount = 0;
     deviceContext->NextSessionId = 1;
     deviceContext->MaxPacketSize = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
     deviceContext->InitializationFlags = 0;
@@ -256,9 +322,11 @@ Ssap3CreateDevice(
         return status;
     }
 
+    /* Parented to the driver, not the device: child objects are cleaned up
+     * before the device cleanup callback, which still needs the lock. It is
+     * deleted explicitly in Ssap3EvtDeviceContextCleanup. */
     WDF_OBJECT_ATTRIBUTES_INIT(&lockAttributes);
     lockAttributes.ParentObject = WdfDeviceGetDriver(device);
-
     status = WdfWaitLockCreate(&lockAttributes, &deviceContext->SessionLock);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -272,8 +340,7 @@ Ssap3CreateDevice(
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchSequential);
     queueConfig.EvtIoDeviceControl = Ssap3EvtIoDeviceControl;
 
-    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, WDF_NO_HANDLE);
-    return status;
+    return WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, WDF_NO_HANDLE);
 }
 
 _Use_decl_annotations_
@@ -303,16 +370,12 @@ Ssap3EvtFileCleanup(
     while (entry != &deviceContext->Sessions) {
         PSSAP3_SESSION_ENTRY session;
         PLIST_ENTRY nextEntry;
-        ULONG driverError;
 
         nextEntry = entry->Flink;
         session = CONTAINING_RECORD(entry, SSAP3_SESSION_ENTRY, ListEntry);
-
         if (session->OwnerFile == FileObject) {
             RemoveEntryList(entry);
-            driverError = SSAP3_DRIVER_ERROR_NONE;
-            Ssap3TransportCloseSession(device, session, &driverError);
-            ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
+            (VOID)Ssap3DestroySessionLocked(device, session);
         }
 
         entry = nextEntry;
@@ -333,17 +396,16 @@ Ssap3EvtDevicePrepareHardware(
     NTSTATUS enumeratorInfoStatus;
     NTSTATUS profileInterfaceStatus;
     NTSTATUS remoteDeviceInfoStatus;
-    NTSTATUS status;
 
     UNREFERENCED_PARAMETER(ResourcesRaw);
     UNREFERENCED_PARAMETER(ResourcesTranslated);
 
     deviceContext = Ssap3GetDeviceContext(Device);
     RtlZeroMemory(&deviceContext->ProfileDriverInterface, sizeof(deviceContext->ProfileDriverInterface));
+    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->HasProfileDriverInterface = FALSE;
     deviceContext->HasRemoteDeviceInfo = FALSE;
     deviceContext->HasAacpEnumeratorInfo = FALSE;
-    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->AacpPort = 0;
     deviceContext->InitializationFlags = 0;
     deviceContext->InitializationFailureStage = 0;
@@ -360,7 +422,8 @@ Ssap3EvtDevicePrepareHardware(
     if (NT_SUCCESS(profileInterfaceStatus)) {
         deviceContext->HasProfileDriverInterface = TRUE;
         deviceContext->InitializationFlags |= SSAP3_INIT_FLAG_PROFILE_INTERFACE;
-        if (deviceContext->ProfileDriverInterface.BthInitializeBrb != NULL) {
+        if (deviceContext->ProfileDriverInterface.BthInitializeBrb != NULL &&
+            deviceContext->ProfileDriverInterface.BthReuseBrb != NULL) {
             deviceContext->InitializationFlags |= SSAP3_INIT_FLAG_BRB_INITIALIZER;
         } else {
             deviceContext->InitializationFailureStage = 4;
@@ -387,12 +450,7 @@ Ssap3EvtDevicePrepareHardware(
         deviceContext->InitializationStatus = enumeratorInfoStatus;
     }
 
-    status = Ssap3TransportQueryStatus(Device, &deviceContext->CapabilityFlags, &deviceContext->LastError);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    return STATUS_SUCCESS;
+    return Ssap3TransportQueryStatus(Device, &deviceContext->CapabilityFlags, &deviceContext->LastError);
 }
 
 _Use_decl_annotations_
@@ -416,10 +474,10 @@ Ssap3EvtDeviceReleaseHardware(
     }
 
     RtlZeroMemory(&deviceContext->ProfileDriverInterface, sizeof(deviceContext->ProfileDriverInterface));
+    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->HasProfileDriverInterface = FALSE;
     deviceContext->HasRemoteDeviceInfo = FALSE;
     deviceContext->HasAacpEnumeratorInfo = FALSE;
-    RtlZeroMemory(&deviceContext->RemoteDeviceInfo, sizeof(deviceContext->RemoteDeviceInfo));
     deviceContext->AacpPort = 0;
     deviceContext->InitializationFlags = 0;
     deviceContext->InitializationFailureStage = 0;
@@ -440,6 +498,7 @@ Ssap3EvtDeviceContextCleanup(
     device = (WDFDEVICE)DeviceObject;
     deviceContext = Ssap3GetDeviceContext(device);
     Ssap3CloseAllSessions(device);
+    Ssap3FreeZombieSessions(deviceContext);
 
     if (deviceContext->SessionLock != NULL) {
         WDFWAITLOCK sessionLock;
@@ -457,10 +516,7 @@ Ssap3SetLastError(
     ULONG LastError
     )
 {
-    PSSAP3_DEVICE_CONTEXT deviceContext;
-
-    deviceContext = Ssap3GetDeviceContext(Device);
-    deviceContext->LastError = LastError;
+    Ssap3GetDeviceContext(Device)->LastError = LastError;
 }
 
 _Use_decl_annotations_
