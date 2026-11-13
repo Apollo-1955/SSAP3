@@ -187,7 +187,9 @@ public class BluetoothCryptographyTests
         // Bluetooth Core Specification, Vol 3, Part H, Appendix D (ah):
         // IRK ec0234a357c8ad05341010a60a397d9b, prand 708194 -> hash 0dfbaa.
         var irkMsbFirst = Convert.FromHexString("ec0234a357c8ad05341010a60a397d9b");
-        var irkLsbFirst = irkMsbFirst.Reverse().ToArray();
+        // Explicit LINQ call: with C# 14 span conversions, array.Reverse() binds to
+        // the in-place MemoryExtensions.Reverse (void).
+        var irkLsbFirst = Enumerable.Reverse(irkMsbFirst).ToArray();
         Assert.True(BluetoothCryptography.VerifyResolvablePrivateAddress("70:81:94:0D:FB:AA", irkLsbFirst));
         Assert.False(BluetoothCryptography.VerifyResolvablePrivateAddress("70:81:94:0D:FB:AB", irkLsbFirst));
     }

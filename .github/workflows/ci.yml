@@ -60,14 +60,11 @@ jobs:
             TestResults/
             artifacts/ssap3.cdx.json
 
-  native:
-    name: Spatial engine and AAP driver (MSVC/WDK)
+  spatial-engine:
+    name: Spatial engine (MSVC)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 8.0.x
 
       - name: Build spatial engine (/W4 /WX /guard:cf)
         shell: powershell
@@ -76,6 +73,22 @@ jobs:
       - name: Spatial engine tests (bit-exact Off, NaN/Inf/stale rejection, click test)
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\test-spatializer.ps1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ssap3-spatial-engine-unsigned
+          path: audio/bin/SSAP3Spatializer.dll
+          if-no-files-found: ignore
+
+  driver:
+    name: AAP driver (MSVC/WDK)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
 
       - name: Restore pinned WDK packages
         run: dotnet restore driver/WdkPackages.proj
@@ -86,9 +99,8 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ssap3-native-unsigned
+          name: ssap3-driver-unsigned
           path: |
-            audio/bin/SSAP3Spatializer.dll
             driver/Ssap3Aap/bin-msvc/ssap3aap.sys
             driver/Ssap3Aap/bin-msvc/ssap3aap.pdb
 
