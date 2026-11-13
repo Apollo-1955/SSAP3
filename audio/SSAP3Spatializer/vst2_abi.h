@@ -67,7 +67,7 @@ constexpr std::int32_t MakeFourCC(char a, char b, char c, char d)
 }
 
 constexpr std::int32_t kEffectMagic = MakeFourCC('V', 's', 't', 'P');
-constexpr std::int32_t kSsap3UniqueId = MakeFourCC('S', 'S', 'H', 'T');
+constexpr std::int32_t kSsap3UniqueId = MakeFourCC('S', 'S', 'A', '3');
 constexpr std::int32_t kEffectCanReplacing = 1 << 4;
 
 constexpr std::int32_t effOpen = 0;
