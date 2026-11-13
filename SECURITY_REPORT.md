@@ -29,7 +29,7 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-08 | Medium | Caller-chosen remote address | **Fixed** | Sessions always target the PDO address; a mismatch is rejected. |
 | S-09 | Medium | Arbitrary AACP relay | **Fixed** | Device SDDL is `SY/BA:GA, IU:GRGW`. Outbound allowlist: handshake; opcodes `0x09` (ids `0x06`/`0x0D`/`0x28` only), `0x0F`, `0x17`, `0x4D`. |
 | S-10 | Medium | Executable search in parent folders | **Fixed** | Installed path only, plus a SHA-256 pin check before every launch. |
-| S-11 | Medium | Unpinned third-party binaries | **Partly fixed** | SoundVolumeView pinned in code, build script and `THIRD_PARTY.md`. Equalizer APO runtime files are not yet hash-pinned file by file (they are not in the repository). |
+| S-11 | Medium | Unpinned third-party binaries | **Partly fixed** | SoundVolumeView pinned in code, build script and `THIRD_PARTY.md`. The official Equalizer APO 1.4.2 x64 installer is pinned by SHA-256 (`THIRD_PARTY.md`). CI-built engine DLLs are accepted only if the zip matches the digest GitHub recorded at upload (`tools/dev/Get-SpatialEngineArtifact.ps1`). The installed Equalizer APO runtime files are not pinned file by file. |
 | S-12 | Medium | Strangers' AirPods shown as yours | **Fixed** | `AdvertisementFilter`: paired model ID (from Windows' Device ID) plus RSSI floor. UI labels unverified advertisements as "nearby". Unit-tested. |
 | S-13 | Medium | Unredacted diagnostics | **Fixed** | `DiagnosticRedactor` applied to reports and the app log (addresses, device names, profile paths). Opt-in `--include-identifiers`. Unit-tested. |
 | S-14 | Medium | Unconfirmed mode changes reported as success | **Fixed** | `ListeningModeController` reports Confirmed / Rejected / Unconfirmed. Unit-tested. |
@@ -41,6 +41,12 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-20 | Low | CI hardening gaps | **Fixed** | Actions pinned by SHA. Least-privilege permissions. CodeQL (C#, C/C++), gitleaks, dependency review, NuGet audit, script checks. First run (#1, `414b091`): CodeQL C# and C/C++, gitleaks and script checks passed. |
 | S-21 | Info | Unsigned artifacts | **Open** | Needs an OV/EV code-signing certificate. |
 | S-22 | Medium | INF set device security in the software key, where PnP ignores it | **Fixed (compiled in CI, run #4)** | `Security`, `DeviceCharacteristics` (`FILE_DEVICE_SECURE_OPEN`) and `DeviceType` moved to the `.HW` section. Runtime effect needs verification on hardware. |
+| S-23 | High | Equalizer APO's own installer grants `BUILTIN\Users` full control of its `config` folder (`Setup.nsi`: `AccessControl::GrantOnFile "$INSTDIR\config" "(S-1-5-32-545)" "FullAccess"`). `config.txt` accepts absolute plug-in paths (`VSTPluginFilterFactory.cpp`), so any standard user could load a DLL into `audiodg.exe` (LOCAL SERVICE). | **Mitigated by SSAP3 Setup (not executed elevated)** | The engine task removes write access for everyone except SYSTEM, Administrators and TrustedInstaller on the config folder and every file in it, keeps read access, refuses links and junctions, and records each security descriptor for exact restore. Tested non-elevated on a scratch copy of the same ACL: write removed from all 4 objects, read kept, all 4 descriptors restored byte-for-byte. Upstream issue, not yet reported to Equalizer APO. |
+| S-24 | Low | Equalizer APO's optional update checker runs at every sign-in, contacts `equalizerapo.sourceforge.io`, and opens a URL taken from the server's reply (`UpdateChecker.cpp`) | **Fixed (not executed)** | The engine task exports and removes the `EqualizerAPOUpdateChecker` scheduled task if present, and restores it from the exported XML on uninstall. The verifier reports it. |
+| S-25 | Medium | Setup would overwrite Equalizer APO's saved original effects (`Child APOs`) for an endpoint already attached with Device Selector, and uninstall would then delete that record | **Fixed** | Endpoints that already use Equalizer APO are left untouched. |
+| S-26 | High | DLL planting: `audiodg.exe` loads every DLL in the Equalizer APO folder; a custom install folder outside Program Files may be user-writable | **Fixed (not executed)** | Setup refuses to continue unless the Equalizer APO folder, each DLL in it, `VSTPlugins`, `HKLM\SOFTWARE\EqualizerAPO` and its `Child APOs` key are admin-only, and `ConfigPath` is inside the install folder. |
+| S-27 | Medium | Setup's own admin-only check was wrong in two ways: composite rights (`Modify`, `FullControl`, `WriteKey`) include read bits, so read-only ACEs counted as write access; and translating ACE names to SIDs throws for capability SIDs (ALL APPLICATION PACKAGES) | **Fixed** | The check now reads SIDs directly and uses modify-only bits (plus unmapped `GENERIC_WRITE`/`GENERIC_ALL`). Tested: `Program Files`, `dotnet.exe` and an HKLM key pass; the user profile is refused. Before the fix, every Program Files path would have been refused, so Setup could never have completed. Registry ACLs are read through the key object because `Get-Acl -LiteralPath` fails on registry paths in Windows PowerShell 5.1. |
+| S-28 | Low | The engine's `Device: AirPods` filter matched any device whose name contains "AirPods", such as a second pair | **Fixed** | Scoped to the endpoint GUIDs that Setup attached. |
 
 No **critical or high** finding is open in source. Several fixes are **not
 yet compiled or executed** (see §6). Until they are, they are not
@@ -107,6 +113,8 @@ after setup.
 | App launch on real Windows 11 26200 | Starts; honest states shown (Bluetooth off, AAP driver missing, engine not installed). A TimeSpan overflow crash found by this run was **fixed**. |
 | CI run #1 (GitHub Actions, `414b091`) | CodeQL `security-extended` for C# and C/C++: pass. gitleaks: pass. Script parse and forbidden-operation checks: pass. Spatial engine compiled under `/W4 /WX /guard:cf`. Spatial-engine tests and the managed test build failed (fixed in the next commits; see `DEVELOPMENT_STATUS.md`). |
 | CI run #4 (`f3cf186`) | **All jobs pass.** Driver compiles (`/W4 /WX /guard:cf`), links and passes InfVerif; spatial-engine tests pass. |
+| Setup permission logic (S-23, S-27), non-elevated, scratch folder | Pass. Reproduced Equalizer APO's `Users: FullAccess` grant; after hardening, `Users` can write 0 of 4 objects and read all 4; exact restore of all 4 security descriptors. Owner change not exercised (needs elevation). |
+| `Test-Ssap3SystemState.ps1 -Verify` after the S-23/S-24 additions | Pass. Equalizer APO not installed on this PC yet. |
 | **Not performed** | Loading the driver anywhere; Driver Verifier; Application Verifier; ASan/UBSan; coverage-guided fuzzing; installer and uninstaller execution; any AirPods hardware test |
 
 ## 7. Driver security review (source)
@@ -146,3 +154,9 @@ after setup.
 - Exclusive-mode and ASIO audio bypass the engine.
 - The opt-in engine requires `DisableProtectedAudioDG`, which weakens a
   system-wide audio protection while it is installed.
+- With the engine installed, any administrator, and any code an
+  administrator runs, can still load DLLs into `audiodg.exe` through
+  Equalizer APO. S-23 and S-26 close that path for standard users only.
+- Uninstall restores Equalizer APO's original permissions exactly, including
+  its user-writable config folder (S-23), because SSAP3 does not own Equalizer
+  APO. Uninstall Equalizer APO too, or keep the folder admin-only by hand.

@@ -56,6 +56,54 @@ task. When you do, Setup records the previous value, every audio endpoint
 effect it touches, and the owner and permissions of any registry key it has
 to take over. Uninstall restores all of them exactly.
 
+#### Using an Equalizer APO you installed yourself
+
+If Equalizer APO 1.4.2 is already installed (official installer, SHA-256 in
+`THIRD_PARTY.md`), the engine task uses it instead of bundling a copy, and
+hardens it:
+
+- **Config folder made admin-only for writing** (`SECURITY_REPORT.md` S-23).
+  Equalizer APO's installer gives every standard user full control of
+  `config`, and `config.txt` can load any DLL into the audio service. Users
+  keep read access. To edit the config afterwards, run the Equalizer APO
+  Configuration Editor as administrator.
+- **Update checker removed** if it was enabled (S-24). It runs at every
+  sign-in and opens a link chosen by the update server.
+- **Load paths checked** (S-26). Setup refuses to continue if standard users
+  can modify the Equalizer APO folder, its DLLs, `VSTPlugins`, or its HKLM
+  key.
+- **Device Selector choices kept.** If you already attached the AirPods
+  with Equalizer APO's Device Selector, their effects are left as they are.
+- **Scoped by endpoint GUID.** The plug-in runs only on the AirPods stereo
+  endpoints that exist at install time. If you re-pair the AirPods and
+  Windows creates a new endpoint, run Setup again.
+
+On uninstall, SSAP3 restores the recorded permissions and the update checker
+task, and leaves Equalizer APO installed, because you installed it. Remove it
+from **Settings > Apps** if you no longer want it. Its own uninstaller removes
+`DisableProtectedAudioDG`.
+
+## Install without Inno Setup (development and test PCs)
+
+`SSAP3-Setup.exe` needs Inno Setup to build. On a development PC you can
+install the same package directly:
+
+```powershell
+# 1. Spatial engine DLL: build it (needs MSVC: .\audio\build-spatializer.ps1),
+#    or verify and unpack a CI artifact you downloaded while signed in to GitHub:
+.\tools\dev\Get-SpatialEngineArtifact.ps1 -ZipPath "$env:USERPROFILE\Downloads\ssap3-spatial-engine-unsigned.zip" -ArtifactId <id>
+# 2. Stage the package in artifacts\package:
+.\installer\build-installer.ps1 -StageOnly
+# 3. From an elevated PowerShell:
+.\installer\Install-SSAP3Local.ps1 -EnableSpatialEngine
+# Remove everything again (elevated):
+.\installer\Uninstall-SSAP3Local.ps1
+```
+
+`Install-SSAP3Local.ps1` copies the package into `%ProgramFiles%\SSAP3`,
+checks that every copied setup and engine file is admin-only, and then runs
+the same `Install-SSAP3.ps1` step as Setup from that copy.
+
 ## Install
 
 1. Pair your AirPods Pro 3 in **Settings > Bluetooth & devices**, and connect
@@ -118,7 +166,8 @@ informational. `-Verify` alone checks that no SSAP3-owned object remains.
 | --- | --- |
 | "Bluetooth is off" | Turn on Bluetooth in Windows Settings. SSAP3 never changes the radio. |
 | "Connected (audio only)" | No Microsoft-signed AAP driver is installed. See *About the AAP driver*. |
-| Fixed and Off sound the same | The opt-in engine is not installed, the output is not **AirPods (Stereo)**, or the app uses WASAPI exclusive mode or ASIO, which bypass endpoint effects. |
+| Fixed and Off sound the same | The opt-in engine is not installed, the output is not **AirPods (Stereo)**, or the app uses WASAPI exclusive mode or ASIO, which bypass endpoint effects. If you re-paired the AirPods, run Setup again so the engine is scoped to the new endpoint. |
+| Equalizer APO Editor cannot save | SSAP3 made the config folder admin-only (S-23). Run the Editor as administrator. |
 | Call audio sounds like a telephone | Using the AirPods microphone switches Bluetooth to the Hands-Free profile. Use another microphone. |
 | Head tracking turns the wrong way | Settings > Head tracking > **Invert yaw**. The AirPods Pro 3 orientation decoder is not hardware-verified yet. |
 | Need support data | **Report** creates a redacted local ZIP. Review it before sharing; nothing is uploaded. |

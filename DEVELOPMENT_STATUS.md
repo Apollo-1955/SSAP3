@@ -48,7 +48,8 @@ The status legend:
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
 | Driver (C) | ✓ | compiles, links, passes InfVerif (CI run #4); not loaded or run anywhere | ✗ (no WDK locally) | — |
-| Installer and uninstaller | ✓ | parse-checked | ✗ (needs admin and changes the audio stack) | — |
+| Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | ✗ (needs admin and changes the audio stack) | — |
+| Package staging (`build-installer.ps1 -StageOnly`) | ✓ | — | ✓ (app published, SBOM written; engine DLL not yet present) | n/a |
 | System-state verifier | ✓ | — | ✓ (`-Verify` pass) | n/a |
 | CI workflow | ✓ | — | ✓ (runs on every push) | n/a |
 
@@ -74,11 +75,17 @@ The status legend:
 
 ## Next steps
 
-1. Load-test the driver on a development PC with Driver Verifier, and
+1. Fixed-mode soundstage on this PC (no driver needed):
+   - install Equalizer APO 1.4.2 with its official installer;
+   - unpack the CI engine DLL with `tools/dev/Get-SpatialEngineArtifact.ps1`;
+   - run `build-installer.ps1 -StageOnly`, then `Install-SSAP3Local.ps1
+     -EnableSpatialEngine` elevated;
+   - listen in Fixed mode.
+2. Load-test the driver on a development PC with Driver Verifier, and
    submit it for attestation signing.
-2. Run the installer and uninstaller on a disposable Windows 11 VM with
+3. Run the installer and uninstaller on a disposable Windows 11 VM with
    before/after snapshots.
-3. HRIR convolution renderer and SOFA import (ADR-5), with a fuzzed loader.
-4. Wire the microphone VAD (non-AirPods input), and add exclusive-mode
+4. HRIR convolution renderer and SOFA import (ADR-5), with a fuzzed loader.
+5. Wire the microphone VAD (non-AirPods input), and add exclusive-mode
    bypass detection.
-5. Expand the app to the full multi-page window.
+6. Expand the app to the full multi-page window.

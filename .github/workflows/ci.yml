@@ -139,7 +139,7 @@ jobs:
           # Production setup must never weaken the platform (SECURITY_AUDIT.md S-01/S-03).
           $patterns = 'bcdedit\s+/set', 'Suspend-BitLocker', 'certutil.*-addstore', 'Import-Certificate', 'Cert:\\LocalMachine\\Root', 'testsigning\s+on'
           # Test-Ssap3SystemState.ps1 is excluded: it only READS the Root store to detect leftovers.
-          $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1 -Pattern $patterns
+          $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1, installer\Install-SSAP3Local.ps1, installer\Uninstall-SSAP3Local.ps1 -Pattern $patterns
           if ($hits) { $hits | ForEach-Object { Write-Output "::error file=$($_.Path),line=$($_.LineNumber)::$($_.Line.Trim())" }; exit 1 }
 
       - name: System-state verifier runs read-only on a clean runner

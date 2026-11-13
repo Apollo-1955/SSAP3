@@ -39,6 +39,19 @@ $script:SidAdministrators = 'S-1-5-32-544'
 $script:SidInteractive = 'S-1-5-4'
 $script:SidLocalService = 'S-1-5-19'
 $script:SidUsers = 'S-1-5-32-545'
+$script:SidTrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+$script:TrustedSids = @($script:SidSystem, $script:SidAdministrators, $script:SidTrustedInstaller)
+
+# Access bits that let a principal change, replace or re-permission an object.
+# Composite names (Modify, FullControl, WriteKey) are NOT used: they include
+# read bits, so every read-only ACE would look like write access.
+# GENERIC_ALL (0x10000000) and GENERIC_WRITE (0x40000000) are included because
+# they can appear unmapped in ACEs written by third-party installers.
+#   File:     WriteData 0x2, AppendData 0x4, WriteEA 0x10, DeleteChild 0x40,
+#             WriteAttributes 0x100, DELETE 0x10000, WRITE_DAC 0x40000, WRITE_OWNER 0x80000
+#   Registry: SetValue 0x2, CreateSubKey 0x4, CreateLink 0x20, DELETE, WRITE_DAC, WRITE_OWNER
+$script:FileWriteMask = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+$script:RegistryWriteMask = [int64](0x2 -bor 0x4 -bor 0x20 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
 
 function Write-Ssap3Log {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -128,27 +141,60 @@ function Complete-Ssap3Step {
 
 function Get-Ssap3Sid([string]$Sid) { New-Object Security.Principal.SecurityIdentifier($Sid) }
 
-function Test-Ssap3TrustedOwner {
+# Get-Acl -LiteralPath fails on registry paths in Windows PowerShell 5.1
+# ("Cannot find path HKEY_LOCAL_MACHINE\..."), so keys are read through the key object.
+function Get-Ssap3Acl {
     param([Parameter(Mandatory = $true)][string]$Path)
-    $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
-    return $owner -in @($script:SidSystem, $script:SidAdministrators, 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    if ($Path -like 'HKLM:*') { return (Get-Item -LiteralPath $Path).GetAccessControl() }
+    return Get-Acl -LiteralPath $Path
 }
 
-# Refuses to trust any file or folder that a standard user could have planted (S-02).
+function Test-Ssap3TrustedOwner {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $owner = (Get-Ssap3Acl -Path $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    return $owner -in $script:TrustedSids
+}
+
+function Get-Ssap3RuleSid($Rule) {
+    return $Rule.IdentityReference.Value
+}
+
+# ACEs with SIDs, not account names: translating names back to SIDs throws for
+# capability SIDs such as ALL APPLICATION PACKAGES, which Program Files carries.
+function Get-Ssap3AccessRules($Acl) {
+    return @($Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+}
+
+# SIDs other than SYSTEM, Administrators and TrustedInstaller that can modify the
+# object itself. Inherit-only ACEs are skipped: they do not apply to this object
+# (children are checked on their own).
+function Get-Ssap3UntrustedWriters {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Ssap3Acl -Path $Path
+    $isRegistry = $Path -like 'HKLM:*'
+    $writers = @()
+    foreach ($rule in (Get-Ssap3AccessRules $acl)) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+        $sid = Get-Ssap3RuleSid $rule
+        if ($sid -in $script:TrustedSids) { continue }
+        $rights = if ($isRegistry) { [int64]$rule.RegistryRights } else { [int64]$rule.FileSystemRights }
+        $mask = if ($isRegistry) { $script:RegistryWriteMask } else { $script:FileWriteMask }
+        if (($rights -band $mask) -ne 0) { $writers += $sid }
+    }
+    return @($writers | Select-Object -Unique)
+}
+
+# Refuses to trust any file, folder or HKLM key that a standard user could have
+# planted or can modify (S-02, S-23, S-26).
 function Assert-Ssap3AdminOnlyPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Ssap3TrustedOwner -Path $Path)) {
-        throw "Refusing to use $Path because it is not owned by SYSTEM or Administrators."
+        throw "Refusing to use $Path because it is not owned by SYSTEM, Administrators or TrustedInstaller."
     }
-    $acl = Get-Acl -LiteralPath $Path
-    foreach ($rule in $acl.Access) {
-        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-        $writeRights = [Security.AccessControl.FileSystemRights]'Write, Modify, FullControl, ChangePermissions, TakeOwnership, Delete'
-        if ($rule.AccessControlType -eq 'Allow' -and
-            $sid -notin @($script:SidSystem, $script:SidAdministrators, 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') -and
-            ($rule.FileSystemRights -band $writeRights) -ne 0) {
-            throw "Refusing to use $Path because $sid can modify it."
-        }
+    $writers = @(Get-Ssap3UntrustedWriters -Path $Path)
+    if ($writers.Count -gt 0) {
+        throw "Refusing to use $Path because $($writers -join ', ') can modify it."
     }
 }
 
@@ -417,13 +463,142 @@ public static class Ssap3Privilege {
     }
 }
 
+# ---------------------------------------------------------------- Equalizer APO hardening
+#
+# S-23: Equalizer APO 1.4.2's own installer grants BUILTIN\Users FullAccess on its
+# config folder (Setup.nsi: AccessControl::GrantOnFile "$INSTDIR\config"
+# "(S-1-5-32-545)" "FullAccess"). config.txt accepts absolute plug-in paths
+# ("VSTPlugin: Library C:\any\file.dll", VSTPluginFilterFactory.cpp), and
+# audiodg.exe loads them as LOCAL SERVICE, so any standard user or any process
+# running as one could run code in the audio engine. SSAP3 removes write access
+# for everyone except SYSTEM, Administrators and TrustedInstaller, keeps read
+# access, and records every security descriptor first so uninstall restores
+# them exactly.
+#
+# S-24: the optional Equalizer APO update checker runs at every logon, contacts
+# equalizerapo.sourceforge.io and opens a server-supplied URL. SSAP3 removes the
+# scheduled task if it exists (recorded; restored on uninstall).
+#
+# S-26: every DLL audiodg.exe loads from the Equalizer APO folder, and the
+# HKLM\SOFTWARE\EqualizerAPO key (ConfigPath, Child APOs), must be admin-only.
+# Setup refuses to continue otherwise.
+
+$script:UpdateCheckerTask = 'EqualizerAPOUpdateChecker'
+
+function Get-Ssap3EqualizerInstall {
+    $installPath = [string](Get-Ssap3RegistryValue -Path $script:EqualizerRegistry -Name 'InstallPath').value
+    if (-not $installPath) { return $null }
+    $installPath = [IO.Path]::GetFullPath($installPath).TrimEnd('\')
+    if (-not (Test-Path -LiteralPath (Join-Path $installPath 'EqualizerAPO.dll') -PathType Leaf)) { return $null }
+    $configPath = [string](Get-Ssap3RegistryValue -Path $script:EqualizerRegistry -Name 'ConfigPath').value
+    if (-not $configPath) { $configPath = Join-Path $installPath 'config' }
+    return [pscustomobject]@{
+        InstallPath = $installPath
+        ConfigPath = [IO.Path]::GetFullPath($configPath).TrimEnd('\')
+    }
+}
+
+# Removes write access for untrusted SIDs from one object while keeping their
+# read access, and makes Administrators the owner if an untrusted SID owns it.
+function Remove-Ssap3UntrustedWrite {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path
+    $changed = $false
+    foreach ($rule in (Get-Ssap3AccessRules $acl)) {
+        if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow') { continue }
+        $sid = Get-Ssap3RuleSid $rule
+        if ($sid -in $script:TrustedSids) { continue }
+        if (([int64]$rule.FileSystemRights -band $script:FileWriteMask) -eq 0) { continue }
+        [void]$acl.RemoveAccessRuleSpecific($rule)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (Get-Ssap3Sid $sid), [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            $rule.InheritanceFlags, $rule.PropagationFlags, [Security.AccessControl.AccessControlType]::Allow)))
+        $changed = $true
+    }
+    if (-not (Test-Ssap3TrustedOwner -Path $Path)) {
+        $acl.SetOwner((Get-Ssap3Sid $script:SidAdministrators))
+        $changed = $true
+    }
+    if ($changed) { Set-Acl -LiteralPath $Path -AclObject $acl }
+    return $changed
+}
+
+function Protect-Ssap3EqualizerConfig {
+    param([Parameter(Mandatory = $true)][string]$ConfigPath)
+    $items = @(Get-Item -LiteralPath $ConfigPath -Force) + @(Get-ChildItem -LiteralPath $ConfigPath -Recurse -Force)
+    foreach ($item in $items) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to change permissions under $ConfigPath because $($item.FullName) is a link or junction."
+        }
+    }
+    $records = @($items | ForEach-Object { [pscustomobject]@{ path = $_.FullName; sddl = (Get-Acl -LiteralPath $_.FullName).Sddl } })
+    $step = Add-Ssap3Step -Type 'FileSecurity' -Data @{ items = $records; reason = 'S-23: Equalizer APO config folder writable by standard users' }
+    $fixed = 0
+    # Parent first: its new inheritable ACEs propagate before the children are checked.
+    foreach ($item in $items) { if (Remove-Ssap3UntrustedWrite -Path $item.FullName) { $fixed++ } }
+    Complete-Ssap3Step $step
+    foreach ($item in $items) { Assert-Ssap3AdminOnlyPath -Path $item.FullName }
+    Write-Ssap3Log "Equalizer APO config is now admin-only for writing ($fixed object(s) changed, $($items.Count) checked). Run the Equalizer APO Configuration Editor as administrator to edit it."
+}
+
+function Assert-Ssap3EqualizerLoadPathsTrusted {
+    param([Parameter(Mandatory = $true)]$Install)
+    Assert-Ssap3AdminOnlyPath -Path $Install.InstallPath
+    foreach ($dll in Get-ChildItem -LiteralPath $Install.InstallPath -Filter '*.dll' -File -Force) {
+        Assert-Ssap3AdminOnlyPath -Path $dll.FullName
+    }
+    $plugins = Join-Path $Install.InstallPath 'VSTPlugins'
+    if (Test-Path -LiteralPath $plugins) { Assert-Ssap3AdminOnlyPath -Path $plugins }
+    foreach ($key in @($script:EqualizerRegistry, "$($script:EqualizerRegistry)\Child APOs")) {
+        if (Test-Path -LiteralPath $key) { Assert-Ssap3AdminOnlyPath -Path $key }
+    }
+    $installRoot = $Install.InstallPath + '\'
+    if (-not ($Install.ConfigPath + '\').StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Equalizer APO's ConfigPath ($($Install.ConfigPath)) is outside its install folder. SSAP3 only supports the default layout; reinstall Equalizer APO with its defaults."
+    }
+}
+
+function Disable-Ssap3EqualizerUpdateChecker {
+    $tasks = @(Get-ScheduledTask -TaskName $script:UpdateCheckerTask -ErrorAction SilentlyContinue)
+    if ($tasks.Count -eq 0) {
+        Write-Ssap3Log 'Equalizer APO update checker: off (no scheduled task).'
+        return
+    }
+    foreach ($task in $tasks) {
+        $xml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath
+        $step = Add-Ssap3Step -Type 'ScheduledTask' -Data @{ name = $task.TaskName; taskPath = $task.TaskPath; xml = [string]$xml; reason = 'S-24: update checker opens a server-supplied URL' }
+        Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false
+        Complete-Ssap3Step $step
+        Write-Ssap3Log "Equalizer APO update checker task removed ($($task.TaskPath)$($task.TaskName)); it is restored on uninstall."
+    }
+}
+
+function Test-Ssap3EndpointUsesEqualizer {
+    param([Parameter(Mandatory = $true)]$Endpoint)
+    foreach ($name in $script:FxNames[0..4]) {
+        if ([string](Get-Ssap3RegistryValue -Path $Endpoint.FxPath -Name $name).value -in @($script:EqualizerPre, $script:EqualizerPost)) { return $true }
+    }
+    return $false
+}
+
 function Install-Ssap3SpatialEngine {
     param([Parameter(Mandatory = $true)][string]$PackageRoot)
 
     $runtimeSource = Join-Path $PackageRoot 'spatial\EqualizerAPO'
     $pluginSource = Join-Path $PackageRoot 'spatial\SSAP3Spatializer.dll'
-    foreach ($required in @($pluginSource, (Join-Path $runtimeSource 'EqualizerAPO.dll'))) {
-        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Spatial engine package file is missing: $required" }
+    if (-not (Test-Path -LiteralPath $pluginSource -PathType Leaf)) { throw "Spatial engine package file is missing: $pluginSource" }
+    Assert-Ssap3AdminOnlyPath -Path $pluginSource
+
+    $existing = Get-Ssap3EqualizerInstall
+    $ownsEqualizer = $null -eq $existing
+    if ($ownsEqualizer -and -not (Test-Path -LiteralPath (Join-Path $runtimeSource 'EqualizerAPO.dll') -PathType Leaf)) {
+        throw 'Equalizer APO is not installed and this package does not bundle it. Install Equalizer APO 1.4.2 x64 (official installer, SHA-256 in THIRD_PARTY.md), then run Setup again.'
+    }
+    $equalizerRoot = if ($ownsEqualizer) { $script:EqualizerRoot } else { $existing.InstallPath }
+    $configRoot = if ($ownsEqualizer) { Join-Path $script:EqualizerRoot 'config' } else { $existing.ConfigPath }
+    if (-not $ownsEqualizer) {
+        Assert-Ssap3EqualizerLoadPathsTrusted -Install $existing
+        Write-Ssap3Log "Using the Equalizer APO installed at $equalizerRoot (not owned by SSAP3; it is left installed on uninstall)."
     }
 
     $endpoints = @(Get-Ssap3AirPodsStereoEndpoints)
@@ -431,13 +606,20 @@ function Install-Ssap3SpatialEngine {
         throw 'No AirPods A2DP stereo endpoint exists yet. Connect the AirPods once, then run Setup again to add the spatial engine.'
     }
 
-    $ownsEqualizer = -not (Test-Path -LiteralPath (Join-Path $script:EqualizerRoot 'EqualizerAPO.dll'))
     $audio = Get-Service -Name Audiosrv
     $step = Add-Ssap3Step -Type 'AudioServiceRestart' -Data @{ wasRunning = ($audio.Status -eq 'Running') }
     Stop-Service -Name Audiosrv -Force
     try {
         # Explicit, consented security setting change (recorded with its prior value).
-        Set-Ssap3RegistryValue -Path $script:AudioPolicyKey -Name 'DisableProtectedAudioDG' -Value 1 -Kind DWord -Reason 'Equalizer APO host for the opt-in spatial engine'
+        # An existing Equalizer APO install has already set it; it is then left as is.
+        if ([string](Get-Ssap3RegistryValue -Path $script:AudioPolicyKey -Name 'DisableProtectedAudioDG').value -ne '1') {
+            Set-Ssap3RegistryValue -Path $script:AudioPolicyKey -Name 'DisableProtectedAudioDG' -Value 1 -Kind DWord -Reason 'Equalizer APO host for the opt-in spatial engine'
+        }
+
+        if (-not $ownsEqualizer) {
+            Protect-Ssap3EqualizerConfig -ConfigPath $configRoot
+            Disable-Ssap3EqualizerUpdateChecker
+        }
 
         if ($ownsEqualizer) {
             $files = @(Get-ChildItem -LiteralPath $runtimeSource -File | ForEach-Object Name)
@@ -452,17 +634,27 @@ function Install-Ssap3SpatialEngine {
             Complete-Ssap3Step $register
         }
 
-        $pluginTarget = Join-Path $script:EqualizerRoot 'VSTPlugins\SSAP3Spatializer.dll'
+        $pluginFolder = Join-Path $equalizerRoot 'VSTPlugins'
+        if (-not (Test-Path -LiteralPath $pluginFolder)) { New-Item -ItemType Directory -Path $pluginFolder | Out-Null }
+        Assert-Ssap3AdminOnlyPath -Path $pluginFolder
+        $pluginTarget = Join-Path $pluginFolder 'SSAP3Spatializer.dll'
         $plugin = Add-Ssap3Step -Type 'OwnedFile' -Data @{ path = $pluginTarget }
         Copy-Item -LiteralPath $pluginSource -Destination $pluginTarget -Force
         Complete-Ssap3Step $plugin
+        Assert-Ssap3AdminOnlyPath -Path $pluginTarget
+        $pluginHash = (Get-FileHash -LiteralPath $pluginTarget -Algorithm SHA256).Hash
+        if ($pluginHash -ne (Get-FileHash -LiteralPath $pluginSource -Algorithm SHA256).Hash) { throw 'The installed spatial engine does not match the package copy.' }
+        Write-Ssap3Log "Spatial engine installed: $pluginTarget (SHA-256 $pluginHash)."
 
-        $configRoot = Join-Path $script:EqualizerRoot 'config'
+        # Scope the plug-in to the AirPods stereo endpoints by GUID. A name pattern
+        # ("AirPods") would also match any other AirPods ever paired with this PC.
+        $deviceFilter = ($endpoints | ForEach-Object { $_.Guid }) -join '; '
         $includeFile = Join-Path $configRoot 'ssap3.txt'
         $include = Add-Ssap3Step -Type 'OwnedFile' -Data @{ path = $includeFile }
-        @('# SSAP3 Spatial Engine (managed by SSAP3 Setup)', 'Device: AirPods', 'Stage: post-mix', 'VSTPlugin: Library "SSAP3Spatializer.dll"') |
+        @('# SSAP3 Spatial Engine (managed by SSAP3 Setup; edits are overwritten)', "Device: $deviceFilter", 'Stage: post-mix', 'VSTPlugin: Library "SSAP3Spatializer.dll"') |
             Set-Content -LiteralPath $includeFile -Encoding UTF8
         Complete-Ssap3Step $include
+        Assert-Ssap3AdminOnlyPath -Path $includeFile
 
         $mainConfig = Join-Path $configRoot 'config.txt'
         $prior = if (Test-Path -LiteralPath $mainConfig) { Get-Content -LiteralPath $mainConfig -Raw } else { $null }
@@ -473,14 +665,19 @@ function Install-Ssap3SpatialEngine {
         Complete-Ssap3Step $configStep
 
         foreach ($endpoint in $endpoints) {
+            if (Test-Ssap3EndpointUsesEqualizer -Endpoint $endpoint) {
+                if ($ownsEqualizer) {
+                    throw "Endpoint $($endpoint.Guid) already references Equalizer APO but no Equalizer APO runtime is installed. Repair it first."
+                }
+                # Attached with Equalizer APO's Device Selector, which already saved the
+                # endpoint's original effects under Child APOs. Rewriting them here would
+                # overwrite that record with Equalizer APO's own CLSIDs, so leave it.
+                Write-Ssap3Log "Endpoint $($endpoint.Guid) already uses Equalizer APO (Device Selector); its effects were not changed."
+                continue
+            }
             Grant-Ssap3EndpointWrite -KeyPath $endpoint.KeyPath -FxPath $endpoint.FxPath
             $priorValues = @{}
             foreach ($name in $script:FxNames) { $priorValues[$name] = Get-Ssap3RegistryValue -Path $endpoint.FxPath -Name $name }
-            foreach ($name in $script:FxNames[0..4]) {
-                if ([string]$priorValues[$name].value -in @($script:EqualizerPre, $script:EqualizerPost) -and $ownsEqualizer) {
-                    throw "Endpoint $($endpoint.Guid) already references Equalizer APO but no Equalizer APO runtime is installed. Repair it first."
-                }
-            }
             $fx = Add-Ssap3Step -Type 'EndpointEffects' -Data @{ fxPath = $endpoint.FxPath; endpoint = $endpoint.Guid; prior = [pscustomobject]$priorValues }
 
             $childPath = Join-Path "$script:EqualizerRegistry\Child APOs" $endpoint.Guid
@@ -535,6 +732,21 @@ function Undo-Ssap3Step {
         }
         'RegistryKeySecurity' {
             if ($d.sddl) { Set-Ssap3KeySddl -Path $d.path -Sddl $d.sddl }
+        }
+        'FileSecurity' {
+            # Parent first, so that each child's own recorded descriptor is applied last.
+            foreach ($item in @($d.items)) {
+                if ($item.sddl -and (Test-Path -LiteralPath $item.path)) {
+                    $acl = Get-Acl -LiteralPath $item.path
+                    $acl.SetSecurityDescriptorSddlForm($item.sddl, [Security.AccessControl.AccessControlSections]'Owner, Group, Access')
+                    Set-Acl -LiteralPath $item.path -AclObject $acl
+                }
+            }
+        }
+        'ScheduledTask' {
+            if (-not (Get-ScheduledTask -TaskName $d.name -TaskPath $d.taskPath -ErrorAction SilentlyContinue)) {
+                Register-ScheduledTask -TaskName $d.name -TaskPath $d.taskPath -Xml $d.xml | Out-Null
+            }
         }
         'EndpointEffects' {
             if (Test-Path -LiteralPath $d.fxPath) {

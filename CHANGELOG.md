@@ -2,6 +2,28 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Spatial engine on an existing Equalizer APO:** the engine task can now
+  use an Equalizer APO 1.4.2 that you installed with its official installer,
+  instead of a bundled copy. It hardens that install:
+  - the config folder is made admin-only for writing (S-23);
+  - the update-checker task is removed (S-24);
+  - Equalizer APO's load paths must be admin-only (S-26);
+  - Device Selector attachments are kept (S-25);
+  - the plug-in is scoped to the AirPods endpoints by GUID (S-28).
+
+  Every change is recorded and restored on uninstall.
+- **Fixed** Setup's admin-only check (S-27). It counted read-only ACEs as
+  write access, failed on capability SIDs, and could not read registry ACLs
+  in Windows PowerShell 5.1. Each of these would have stopped every install.
+- Added `installer/Install-SSAP3Local.ps1` and `Uninstall-SSAP3Local.ps1` to
+  install a staged package without Inno Setup, plus `build-installer.ps1
+  -StageOnly`.
+- Added `tools/dev/Get-SpatialEngineArtifact.ps1`. It accepts a CI-built
+  engine DLL only if its zip matches the digest GitHub recorded, and checks
+  that the DLL is a PE32+ x64 DLL.
+- `build-installer.ps1` now finds a per-user .NET SDK when the machine-wide
+  `dotnet.exe` has no SDK.
+
 - Renamed the product to **SSAP3** (Spatial Sound for AirPods Pro 3). This
   covers assemblies, namespaces, executables, driver, DSP, installer and
   brand mark. Upstream attribution is kept in `THIRD_PARTY.md`.

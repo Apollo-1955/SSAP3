@@ -7,7 +7,9 @@
 | `Uninstall-SSAP3.ps1` | Reverts every recorded change. Idempotent. `-RemoveUserData` for a complete uninstall |
 | `Ssap3Setup.psm1` | Shared engine: manifest, protected ACLs, registry record/restore, driver and spatial-engine steps, undo |
 | `Test-Ssap3SystemState.ps1` | Read-only before/after integrity verifier |
-| `build-installer.ps1` | Builds `artifacts\SSAP3-Setup-<version>.exe`, package hashes and the SBOM |
+| `build-installer.ps1` | Builds `artifacts\SSAP3-Setup-<version>.exe`, package hashes and the SBOM. `-StageOnly` stops after `artifacts\package` |
+| `Install-SSAP3Local.ps1` | Development PCs: copies a staged package to `%ProgramFiles%\SSAP3` and runs `Install-SSAP3.ps1` from there |
+| `Uninstall-SSAP3Local.ps1` | Reverts and removes an `Install-SSAP3Local.ps1` install, then runs the verifier |
 
 Policy: no Test Mode, BCD, Secure Boot, BitLocker or certificate changes.
 The AAP driver is included only from a Microsoft-signed package. The

@@ -66,6 +66,13 @@ Other source-only references:
   stereo endpoints, and only after the user opts in, because the host
   requires `DisableProtectedAudioDG` (see `SECURITY_AUDIT.md`, S-07).
   https://sourceforge.net/projects/equalizerapo/files/1.4.2/
+- Instead of the bundled copy, the engine task can use an Equalizer APO that
+  the user installed with the official installer:
+  - file `EqualizerAPO-x64-1.4.2.exe`;
+  - SHA-256 `7403BE7427BBE1936A40DDED082829B6E217FC4F5990FEE5CBA501F0AE055AFA`;
+  - install it with **Check for updates automatically** unchecked.
+
+  SSAP3 then hardens that install (`SECURITY_REPORT.md` S-23 to S-26).
 
 ## VST compatibility declarations
 

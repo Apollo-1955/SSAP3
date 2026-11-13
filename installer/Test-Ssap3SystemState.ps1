@@ -80,6 +80,31 @@ function Get-Ssap3SystemState {
     $state.security.rootCertificatesNamedSsap3OrSoundStage = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
         Where-Object { $_.Subject -match 'SSAP3|SoundStage' } | ForEach-Object Thumbprint)
 
+    # Equalizer APO exposure (informational: SSAP3 does not own Equalizer APO).
+    # S-23: its installer lets BUILTIN\Users write the config folder. S-24: optional
+    # update checker scheduled at logon.
+    $equalizer = [ordered]@{ installed = $false; configWritableByStandardUsers = 'n/a'; updateCheckerTask = 'n/a' }
+    $installPath = Get-OptionalValue 'HKLM:\SOFTWARE\EqualizerAPO' 'InstallPath'
+    if ($installPath -and (Test-Path -LiteralPath (Join-Path $installPath 'EqualizerAPO.dll'))) {
+        $equalizer.installed = $true
+        $configPath = Get-OptionalValue 'HKLM:\SOFTWARE\EqualizerAPO' 'ConfigPath'
+        if (-not $configPath) { $configPath = Join-Path $installPath 'config' }
+        $writable = $false
+        if (Test-Path -LiteralPath $configPath) {
+            $standardUsers = @('S-1-1-0', 'S-1-5-4', 'S-1-5-11', 'S-1-5-32-545')
+            # Modify-only bits (composite names such as Modify include read bits).
+            $mask = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+            foreach ($rule in (Get-Acl -LiteralPath $configPath).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                if ($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+                $sid = $rule.IdentityReference.Value
+                if ($sid -in $standardUsers -and ([int64]$rule.FileSystemRights -band $mask) -ne 0) { $writable = $true }
+            }
+        }
+        $equalizer.configWritableByStandardUsers = $writable
+        $equalizer.updateCheckerTask = $null -ne (Get-ScheduledTask -TaskName 'EqualizerAPOUpdateChecker' -ErrorAction SilentlyContinue)
+    }
+    $state.equalizerApo = $equalizer
+
     # Audio endpoint effects (hash only: no device names).
     $render = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
     foreach ($endpoint in Get-ChildItem -LiteralPath $render -ErrorAction SilentlyContinue) {
@@ -114,6 +139,8 @@ switch ($PSCmdlet.ParameterSetName) {
         Write-Output ('Security: Secure Boot={0}; Memory Integrity={1}; Defender real-time={2}; Test Mode={3}; DisableProtectedAudioDG={4}' -f
             $state.security.secureBoot, $state.security.memoryIntegrity, $state.security.defenderRealTime, $state.security.testSigning,
             $(if ($null -eq $state.security.disableProtectedAudioDG) { 'absent' } else { $state.security.disableProtectedAudioDG }))
+        Write-Output ('Equalizer APO: installed={0}; config writable by standard users={1}; update checker task={2}' -f
+            $state.equalizerApo.installed, $state.equalizerApo.configWritableByStandardUsers, $state.equalizerApo.updateCheckerTask)
         if ($residue.Count -eq 0) { Write-Output 'PASS: no SSAP3-owned objects found.' ; exit 0 } else { Write-Output 'FAIL: SSAP3-owned objects remain.'; exit 1 }
     }
     'Compare' {

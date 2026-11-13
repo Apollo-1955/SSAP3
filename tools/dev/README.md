@@ -47,3 +47,19 @@ machine where the developer deliberately accepts weaker boot security.
 3. Run `bcdedit /set testsigning off`, restart, then turn Secure Boot back on
    in UEFI.
 4. Confirm with `installer\Test-Ssap3SystemState.ps1 -Verify`.
+
+## Spatial engine from CI (any PC, no Test Mode)
+
+`Get-SpatialEngineArtifact.ps1` is unrelated to the driver steps above and
+changes nothing on Windows. Use it when you have no MSVC toolchain:
+
+1. Download the `ssap3-spatial-engine-unsigned` artifact of a green CI run
+   while signed in to GitHub.
+2. Run `Get-SpatialEngineArtifact.ps1 -ZipPath <zip> -ArtifactId <id>`.
+
+The script unpacks `SSAP3Spatializer.dll` to `audio\bin` only if all of
+these hold:
+
+- the zip matches the SHA-256 digest that GitHub recorded at upload;
+- the zip holds exactly that one DLL;
+- the DLL is a PE32+ x64 DLL.

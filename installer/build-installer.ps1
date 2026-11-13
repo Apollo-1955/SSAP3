@@ -6,7 +6,15 @@ param(
     # by attestation signing. Without it, the package ships WITHOUT the AAP driver.
     [string]$SignedDriverFolder,
     # Folder with the unmodified Equalizer APO 1.4.2 x64 runtime files (optional).
-    [string]$EqualizerApoFolder
+    # Without it, the engine task uses an Equalizer APO the user installed with
+    # the official installer.
+    [string]$EqualizerApoFolder,
+    # SSAP3Spatializer.dll to package. Defaults to audio\bin (local MSVC build, or
+    # a CI artifact unpacked by tools\dev\Get-SpatialEngineArtifact.ps1).
+    [string]$SpatializerDll,
+    # Stage artifacts\package (and its SBOM and hash list) without running Inno
+    # Setup. Install it with installer\Install-SSAP3Local.ps1.
+    [switch]$StageOnly
 )
 
 <#
@@ -19,7 +27,15 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $artifacts = Join-Path $repositoryRoot 'artifacts'
 $packageRoot = Join-Path $artifacts 'package'
-$dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source
+
+# First dotnet that has an SDK: DOTNET_ROOT, then a per-user install, then PATH
+# (a machine-wide dotnet.exe may be runtime-only).
+$dotnet = @(
+    $(if ($env:DOTNET_ROOT) { Join-Path $env:DOTNET_ROOT 'dotnet.exe' }),
+    (Join-Path $env:LocalAppData 'Microsoft\dotnet\dotnet.exe'),
+    (Get-Command dotnet.exe -ErrorAction SilentlyContinue | ForEach-Object Source)
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) -and (& $_ --list-sdks 2>$null) } | Select-Object -First 1
+if (-not $dotnet) { throw 'No .NET 8 SDK was found.' }
 $iscc = @(
     'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     'C:\Program Files\Inno Setup 6\ISCC.exe',
@@ -73,16 +89,21 @@ else {
     Write-Warning 'No Microsoft-signed driver supplied: this package installs without the AAP driver (driverless tier).'
 }
 
-$spatializer = Join-Path $repositoryRoot 'audio\bin\SSAP3Spatializer.dll'
-if ($EqualizerApoFolder -and (Test-Path -LiteralPath $spatializer)) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial\EqualizerAPO') | Out-Null
-    Copy-Item -LiteralPath $spatializer -Destination (Join-Path $packageRoot 'spatial') -Force
-    Copy-Item -Path (Join-Path $EqualizerApoFolder '*') -Destination (Join-Path $packageRoot 'spatial\EqualizerAPO') -Recurse -Force
-    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial\source') | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'third_party\EqualizerAPO\source\EqualizerAPO-src-1.4.2.zip') -Destination (Join-Path $packageRoot 'spatial\source') -Force
+$spatializer = if ($SpatializerDll) { $SpatializerDll } else { Join-Path $repositoryRoot 'audio\bin\SSAP3Spatializer.dll' }
+if (Test-Path -LiteralPath $spatializer -PathType Leaf) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial') | Out-Null
+    Copy-Item -LiteralPath $spatializer -Destination (Join-Path $packageRoot 'spatial\SSAP3Spatializer.dll') -Force
+    if ($EqualizerApoFolder) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial\EqualizerAPO'), (Join-Path $packageRoot 'spatial\source') | Out-Null
+        Copy-Item -Path (Join-Path $EqualizerApoFolder '*') -Destination (Join-Path $packageRoot 'spatial\EqualizerAPO') -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'third_party\EqualizerAPO\source\EqualizerAPO-src-1.4.2.zip') -Destination (Join-Path $packageRoot 'spatial\source') -Force
+    }
+    else {
+        Write-Warning 'Equalizer APO is not bundled: the engine task needs Equalizer APO 1.4.2 installed with its official installer.'
+    }
 }
 else {
-    Write-Warning 'Spatial engine files not supplied: the opt-in engine task will fail cleanly if selected.'
+    Write-Warning 'SSAP3Spatializer.dll not supplied: the opt-in engine task will fail cleanly if selected.'
 }
 
 & (Join-Path $repositoryRoot 'tools\release\New-Sbom.ps1') -PackageRoot $packageRoot -Version $Version -Output (Join-Path $artifacts "SSAP3-$Version.cdx.json")
@@ -91,6 +112,11 @@ $manifest = Get-ChildItem -LiteralPath $packageRoot -File -Recurse | Sort-Object
     "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.FullName.Substring($packageRoot.Length + 1).Replace('\', '/')
 }
 $manifest | Set-Content -LiteralPath (Join-Path $artifacts "SSAP3-$Version-package.sha256") -Encoding ASCII
+
+if ($StageOnly) {
+    Write-Output "Staged $packageRoot (no Setup.exe built). Install it from an elevated PowerShell with installer\Install-SSAP3Local.ps1."
+    return
+}
 
 if (-not $iscc) { throw 'Inno Setup 6 (ISCC.exe) was not found.' }
 Invoke-Checked $iscc @("/DSourceRoot=$packageRoot", "/DOutputRoot=$artifacts", "/DAppVersion=$Version", (Join-Path $PSScriptRoot 'SSAP3.iss'))
