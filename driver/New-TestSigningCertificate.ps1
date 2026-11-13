@@ -7,15 +7,15 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $workspaceRoot = Split-Path $repositoryRoot -Parent
-$stageDriver = Join-Path $workspaceRoot 'soundstage-package-stage\driver'
-$certificatePath = Join-Path $stageDriver 'soundstage-local-test-driver.cer'
+$stageDriver = Join-Path $workspaceRoot 'ssap3-package-stage\driver'
+$certificatePath = Join-Path $stageDriver 'ssap3-dev-test-driver.cer'
 
 New-Item -ItemType Directory -Force -Path $stageDriver | Out-Null
 
 $certificate = New-SelfSignedCertificate `
     -Type CodeSigningCert `
-    -Subject 'CN=SoundStage Local Test Driver' `
-    -FriendlyName 'SoundStage local test driver signing' `
+    -Subject 'CN=SSAP3 Development Test Driver' `
+    -FriendlyName 'SSAP3 local test driver signing' `
     -CertStoreLocation 'Cert:\CurrentUser\My' `
     -KeyAlgorithm RSA `
     -KeyLength 3072 `

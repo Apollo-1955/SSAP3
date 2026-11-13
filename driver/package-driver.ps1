@@ -9,30 +9,30 @@ $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $workspaceRoot = Split-Path $repositoryRoot -Parent
 $projectRoot = Split-Path $workspaceRoot -Parent
 $packageRoot = Join-Path $workspaceRoot '.nuget\packages'
-$sourceRoot = Join-Path $PSScriptRoot 'SoundStageKmdf'
-$sourceSys = Join-Path $sourceRoot 'bin-msvc\soundstage-airpods4-anc.sys'
-$sourceInf = Join-Path $sourceRoot 'soundstage-airpods4-anc.inf'
-$stageRoot = Join-Path $workspaceRoot 'soundstage-package-stage'
+$sourceRoot = Join-Path $PSScriptRoot 'Ssap3Aap'
+$sourceSys = Join-Path $sourceRoot 'bin-msvc\ssap3aap.sys'
+$sourceInf = Join-Path $sourceRoot 'ssap3aap.inf'
+$stageRoot = Join-Path $workspaceRoot 'ssap3-package-stage'
 $stageDriver = Join-Path $stageRoot 'driver'
-$outputRoot = Join-Path $projectRoot 'outputs\SoundStage-Setup'
+$outputRoot = Join-Path $projectRoot 'outputs\SSAP3-Setup'
 $outputDriver = Join-Path $outputRoot 'driver'
 $outputSpatial = Join-Path $outputRoot 'spatial'
 $outputEqualizer = Join-Path $outputSpatial 'EqualizerAPO'
-$spatializerSource = Join-Path $repositoryRoot 'audio\bin\SoundStageSpatializer.dll'
+$spatializerSource = Join-Path $repositoryRoot 'audio\bin\SSAP3Spatializer.dll'
 $equalizerSource = Join-Path $repositoryRoot 'third_party\EqualizerAPO\bin'
 $equalizerSourceArchive = Join-Path `
     $repositoryRoot `
     'third_party\EqualizerAPO\source\EqualizerAPO-src-1.4.2.zip'
-$certificatePath = Join-Path $stageDriver 'soundstage-local-test-driver.cer'
+$certificatePath = Join-Path $stageDriver 'ssap3-dev-test-driver.cer'
 $wdk = Join-Path $packageRoot 'microsoft.windows.wdk.x64\10.0.26100.6584\c'
 $sdk = Join-Path $packageRoot 'microsoft.windows.sdk.cpp\10.0.26100.1\c'
 $infVerifier = Join-Path $wdk 'tools\10.0.26100.0\x64\infverif.exe'
 $inf2Cat = Join-Path $wdk 'bin\10.0.26100.0\x86\Inf2Cat.exe'
 $signTool = Join-Path $sdk 'bin\10.0.26100.0\x64\signtool.exe'
 $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-$stageSys = Join-Path $stageDriver 'soundstage-airpods4-anc.sys'
-$stageInf = Join-Path $stageDriver 'soundstage-airpods4-anc.inf'
-$stageCat = Join-Path $stageDriver 'soundstage-airpods4-anc.cat'
+$stageSys = Join-Path $stageDriver 'ssap3aap.sys'
+$stageInf = Join-Path $stageDriver 'ssap3aap.inf'
+$stageCat = Join-Path $stageDriver 'ssap3aap.cat'
 
 New-Item -ItemType Directory -Force `
     -Path $stageDriver, $outputDriver, $outputSpatial, $outputEqualizer |
@@ -61,14 +61,14 @@ if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     $certificate = Get-ChildItem -Path Cert:\CurrentUser\My |
         Where-Object {
             $_.HasPrivateKey -and
-            $_.Subject -eq 'CN=SoundStage Local Test Driver' -and
+            $_.Subject -eq 'CN=SSAP3 Development Test Driver' -and
             $_.NotAfter -gt (Get-Date)
         } |
         Sort-Object NotAfter -Descending |
         Select-Object -First 1
     if ($null -eq $certificate) {
         throw (
-            'A SoundStage test-signing certificate with a private key was not found. ' +
+            'A SSAP3 test-signing certificate with a private key was not found. ' +
             'Run driver\New-TestSigningCertificate.ps1 first.')
     }
 
@@ -160,12 +160,12 @@ foreach ($signedPath in @($stageSys, $stageCat)) {
     }
 }
 
-Copy-Item -LiteralPath $stageSys -Destination (Join-Path $outputDriver 'soundstage-airpods4-anc.sys') -Force
-Copy-Item -LiteralPath $stageInf -Destination (Join-Path $outputDriver 'soundstage-airpods4-anc.inf') -Force
-Copy-Item -LiteralPath $stageCat -Destination (Join-Path $outputDriver 'soundstage-airpods4-anc.cat') -Force
-Copy-Item -LiteralPath $certificatePath -Destination (Join-Path $outputDriver 'soundstage-local-test-driver.cer') -Force
+Copy-Item -LiteralPath $stageSys -Destination (Join-Path $outputDriver 'ssap3aap.sys') -Force
+Copy-Item -LiteralPath $stageInf -Destination (Join-Path $outputDriver 'ssap3aap.inf') -Force
+Copy-Item -LiteralPath $stageCat -Destination (Join-Path $outputDriver 'ssap3aap.cat') -Force
+Copy-Item -LiteralPath $certificatePath -Destination (Join-Path $outputDriver 'ssap3-dev-test-driver.cer') -Force
 Copy-Item -LiteralPath $spatializerSource `
-    -Destination (Join-Path $outputSpatial 'SoundStageSpatializer.dll') `
+    -Destination (Join-Path $outputSpatial 'SSAP3Spatializer.dll') `
     -Force
 Get-ChildItem -LiteralPath $equalizerSource -File |
     ForEach-Object {

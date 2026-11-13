@@ -30,13 +30,13 @@ $combinedDeviceValue = '{b3f8fa53-0004-438e-9003-51a46e139bfc},41'
 
 $sourceRoot = Join-Path $PackageRoot 'spatial'
 $runtimeSource = Join-Path $sourceRoot 'EqualizerAPO'
-$pluginSource = Join-Path $sourceRoot 'SoundStageSpatializer.dll'
+$pluginSource = Join-Path $sourceRoot 'SSAP3Spatializer.dll'
 $equalizerRoot = Join-Path $env:ProgramFiles 'EqualizerAPO'
 $configRoot = Join-Path $equalizerRoot 'config'
 $pluginRoot = Join-Path $equalizerRoot 'VSTPlugins'
-$programDataRoot = Join-Path $env:ProgramData 'SoundStage'
+$programDataRoot = Join-Path $env:ProgramData 'SSAP3'
 $statePath = Join-Path $programDataRoot 'head-tracking-state.bin'
-$spatialRegistry = 'HKLM:\SOFTWARE\SoundStage\SpatialAudio'
+$spatialRegistry = 'HKLM:\SOFTWARE\SSAP3\SpatialAudio'
 $originalEffectsRoot = Join-Path $spatialRegistry 'OriginalEffects'
 $equalizerRegistry = 'HKLM:\SOFTWARE\EqualizerAPO'
 $childApoRoot = Join-Path $equalizerRegistry 'Child APOs'
@@ -104,7 +104,7 @@ function Set-RegistryMultiStringIfMissing {
 }
 
 function Enable-RegistryPrivileges {
-    if ('SoundStage.RegistryPrivileges' -as [type]) {
+    if ('SSAP3.RegistryPrivileges' -as [type]) {
         return
     }
 
@@ -112,7 +112,7 @@ function Enable-RegistryPrivileges {
 using System;
 using System.Runtime.InteropServices;
 
-namespace SoundStage
+namespace SSAP3
 {
     public static class RegistryPrivileges
     {
@@ -205,9 +205,9 @@ namespace SoundStage
 }
 '@
 
-    [SoundStage.RegistryPrivileges]::Enable('SeTakeOwnershipPrivilege')
-    [SoundStage.RegistryPrivileges]::Enable('SeRestorePrivilege')
-    [SoundStage.RegistryPrivileges]::Enable('SeBackupPrivilege')
+    [SSAP3.RegistryPrivileges]::Enable('SeTakeOwnershipPrivilege')
+    [SSAP3.RegistryPrivileges]::Enable('SeRestorePrivilege')
+    [SSAP3.RegistryPrivileges]::Enable('SeBackupPrivilege')
 }
 
 function Grant-RegistryAdministratorsControl {
@@ -282,7 +282,7 @@ function Save-OriginalEffects {
             if ([string]$value -in @($equalizerGuidPre, $equalizerGuidPost)) {
                 throw (
                     "Equalizer APO is already attached to $EndpointGuid, " +
-                    'but SoundStage has no independent effects backup. ' +
+                    'but SSAP3 has no independent effects backup. ' +
                     'Restore that endpoint before running setup again.')
             }
         }
@@ -307,13 +307,13 @@ function Save-OriginalEffects {
         $value = [string](Get-PropertyValue $original $name)
         if ($value -in @($equalizerGuidPre, $equalizerGuidPost)) {
             throw (
-                "SoundStage effects backup for $EndpointGuid is unsafe. " +
+                "SSAP3 effects backup for $EndpointGuid is unsafe. " +
                 'It contains an Equalizer APO GUID and will not be used.')
         }
     }
 
     # Equalizer APO reads this key to chain the endpoint's original effects.
-    # Rebuild it from SoundStage's independent backup on every install so an
+    # Rebuild it from SSAP3's independent backup on every install so an
     # interrupted update can never make Equalizer APO instantiate itself.
     $childPath = Join-Path $childApoRoot $EndpointGuid
     Ensure-RegistryKey -Path $childPath
@@ -412,7 +412,7 @@ else {
 }
 
 # Persist ownership before copying files so an interrupted first install can be
-# retried without mistaking SoundStage's private Equalizer APO runtime for a
+# retried without mistaking SSAP3's private Equalizer APO runtime for a
 # third-party installation.
 Ensure-RegistryKey -Path $spatialRegistry
 New-ItemProperty `
@@ -435,7 +435,7 @@ if ($ownsEqualizer) {
 }
 
 $pluginDestination =
-    Join-Path $pluginRoot 'SoundStageSpatializer.dll'
+    Join-Path $pluginRoot 'SSAP3Spatializer.dll'
 $pluginNeedsCopy =
     -not (Test-Path -LiteralPath $pluginDestination) -or
     (Get-FileHash -LiteralPath $pluginSource -Algorithm SHA256).Hash -ne
@@ -503,12 +503,12 @@ if ($registerProcess.ExitCode -ne 0) {
     throw "Equalizer APO registration failed with code $($registerProcess.ExitCode)."
 }
 
-$soundStageConfig = Join-Path $configRoot 'soundstage.txt'
+$soundStageConfig = Join-Path $configRoot 'ssap3.txt'
 @(
-    '# SoundStage system-wide binaural renderer'
+    '# SSAP3 system-wide binaural renderer'
     'Device: AirPods'
     'Stage: post-mix'
-    'VSTPlugin: Library "SoundStageSpatializer.dll"'
+    'VSTPlugin: Library "SSAP3Spatializer.dll"'
 ) | Set-Content -LiteralPath $soundStageConfig -Encoding UTF8
 
 $mainConfig = Join-Path $configRoot 'config.txt'
@@ -517,10 +517,10 @@ if (-not (Test-Path -LiteralPath $mainConfig)) {
 }
 $mainConfigText = Get-Content -LiteralPath $mainConfig -Raw -ErrorAction SilentlyContinue
 if ($null -eq $mainConfigText -or
-    $mainConfigText -notmatch '(?im)^\s*Include:\s*soundstage\.txt\s*$') {
+    $mainConfigText -notmatch '(?im)^\s*Include:\s*ssap3\.txt\s*$') {
     Add-Content `
         -LiteralPath $mainConfig `
-        -Value "`r`n# Managed by SoundStage`r`nInclude: soundstage.txt" `
+        -Value "`r`n# Managed by SSAP3`r`nInclude: ssap3.txt" `
         -Encoding UTF8
 }
 
@@ -542,7 +542,7 @@ $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
 & $icacls $programDataRoot '/grant' '*S-1-5-32-545:(OI)(CI)M' '/T' '/C' |
     Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw "Could not grant SoundStage state-file access (icacls $LASTEXITCODE)."
+    throw "Could not grant SSAP3 state-file access (icacls $LASTEXITCODE)."
 }
 
 Ensure-RegistryKey -Path $childApoRoot
@@ -572,7 +572,7 @@ foreach ($endpoint in Get-ChildItem -LiteralPath $renderRoot) {
     }
 
     try {
-        $probeName = 'SoundStageWriteProbe'
+        $probeName = 'Ssap3WriteProbe'
         New-ItemProperty `
             -LiteralPath $fxPath `
             -Name $probeName `
@@ -669,4 +669,4 @@ try {
 finally {
     Start-Service -Name Audiosrv
 }
-Write-Step 'SoundStage spatial audio engine installed.'
+Write-Step 'SSAP3 spatial audio engine installed.'

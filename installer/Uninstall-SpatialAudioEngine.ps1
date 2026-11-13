@@ -12,7 +12,7 @@ $guidValueNames = @(
     '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},6',
     '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},7'
 )
-$spatialRegistry = 'HKLM:\SOFTWARE\SoundStage\SpatialAudio'
+$spatialRegistry = 'HKLM:\SOFTWARE\SSAP3\SpatialAudio'
 $originalEffectsRoot = Join-Path $spatialRegistry 'OriginalEffects'
 $equalizerRegistry = 'HKLM:\SOFTWARE\EqualizerAPO'
 $childApoRoot = Join-Path $equalizerRegistry 'Child APOs'
@@ -87,18 +87,18 @@ try {
     if (Test-Path -LiteralPath $configPath) {
         $lines = Get-Content -LiteralPath $configPath
         @($lines | Where-Object {
-            $_ -notmatch '(?i)^\s*Include:\s*soundstage\.txt\s*$' -and
-            $_ -notmatch '(?i)^\s*#\s*Managed by SoundStage\s*$'
+            $_ -notmatch '(?i)^\s*Include:\s*ssap3\.txt\s*$' -and
+            $_ -notmatch '(?i)^\s*#\s*Managed by SSAP3\s*$'
         }) | Set-Content -LiteralPath $configPath -Encoding UTF8
     }
 
     Remove-Item `
-        -LiteralPath (Join-Path $equalizerRoot 'config\soundstage.txt') `
+        -LiteralPath (Join-Path $equalizerRoot 'config\ssap3.txt') `
         -Force `
         -ErrorAction SilentlyContinue
     Remove-Item `
         -LiteralPath (
-            Join-Path $equalizerRoot 'VSTPlugins\SoundStageSpatializer.dll') `
+            Join-Path $equalizerRoot 'VSTPlugins\SSAP3Spatializer.dll') `
         -Force `
         -ErrorAction SilentlyContinue
 

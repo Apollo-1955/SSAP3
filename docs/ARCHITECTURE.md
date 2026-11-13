@@ -1,6 +1,6 @@
-# SoundStage architecture
+# SSAP3 architecture
 
-SoundStage is split into small boundaries so the experimental kernel transport,
+SSAP3 is split into small boundaries so the experimental kernel transport,
 protocol parsing, Windows integration, and real-time audio code can be tested
 independently.
 
@@ -8,22 +8,22 @@ independently.
 
 | Component | Responsibility |
 | --- | --- |
-| `SoundStage.App` | WPF tray panel, user settings, mode state, animations, lifecycle |
-| `SoundStage.Core` | AAP packets, BLE/AAP parsers, crypto helpers, profile policy |
-| `SoundStage.Platform.Windows` | BLE watcher, remembered-device discovery, AAP/UARP service repair, audio endpoint control, driver client |
-| `SoundStageKmdf` | Apple AAP/UARP Bluetooth profile binding and bounded packet transport |
-| `SoundStageSpatializer` | Real-time stereo-to-binaural rendering |
-| `SoundStage.Diagnostics` | Windows/Bluetooth/audio reports and an explicit profile-repair command |
-| `SoundStage.TransportProbe` | Low-level AAP transport diagnostics |
+| `SSAP3.App` | WPF tray panel, user settings, mode state, animations, lifecycle |
+| `SSAP3.Core` | AAP packets, BLE/AAP parsers, crypto helpers, profile policy |
+| `SSAP3.Platform.Windows` | BLE watcher, remembered-device discovery, AAP/UARP service repair, audio endpoint control, driver client |
+| `Ssap3Aap` | Apple AAP/UARP Bluetooth profile binding and bounded packet transport |
+| `SSAP3Spatializer` | Real-time stereo-to-binaural rendering |
+| `SSAP3.Diagnostics` | Windows/Bluetooth/audio reports and an explicit profile-repair command |
+| `SSAP3.TransportProbe` | Low-level AAP transport diagnostics |
 | `installer` | Two-stage install, endpoint-effect chaining, and reversible uninstall |
 
 ## Control path
 
 1. The app locates a remembered AirPods Bluetooth address.
-2. The user-mode client enumerates the SoundStage device interface
+2. The user-mode client enumerates the SSAP3 device interface
    `{3E98D13A-B2A5-4C3D-AE1E-8DB4F3D8C1F0}`.
 3. It checks the version and capability flags through
-   `LIBREPODS_IOCTL_GET_BRIDGE_STATUS`.
+   `SSAP3_IOCTL_GET_BRIDGE_STATUS`.
 4. It opens an AAP session for the selected address.
 5. The KMDF driver submits Bluetooth Request Blocks through
    `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE`.
@@ -76,7 +76,7 @@ recorded in `THIRD_PARTY.md`.
 
 ## Battery and status
 
-SoundStage has two telemetry paths:
+SSAP3 has two telemetry paths:
 
 1. Apple Bluetooth LE manufacturer advertisements provide model, connection,
    charging, in-ear, and battery values.
@@ -92,7 +92,7 @@ pairing records.
 
 ## Motion pipeline
 
-1. SoundStage requests the AirPods motion stream over AAP.
+1. SSAP3 requests the AirPods motion stream over AAP.
 2. `HeadTrackingFrameParser` validates packet prefixes and extracts orientation
    and acceleration fields.
 3. Initial frames establish a parser neutral reference.
@@ -102,7 +102,7 @@ pairing records.
 6. Adaptive smoothing uses a lower coefficient for small jitter and a higher
    coefficient for deliberate movement.
 7. The resulting pose is written to
-   `C:\ProgramData\SoundStage\head-tracking-state.bin`.
+   `C:\ProgramData\SSAP3\head-tracking-state.bin`.
 
 The state file is memory-mapped with shared read/write access. Sequence numbers
 provide a small seqlock-style snapshot: odd means a write is in progress, even
@@ -112,7 +112,7 @@ poses older than 1.2 seconds and falls back to centered rendering.
 ## Spatial audio pipeline
 
 The installer attaches Equalizer APO to the AirPods A2DP Stereo render
-endpoint and loads `SoundStageSpatializer.dll` at post-mix stage.
+endpoint and loads `SSAP3Spatializer.dll` at post-mix stage.
 
 Processing modes:
 
@@ -136,7 +136,7 @@ The tuned scene presents a detached stereo system in a compact treated room.
 It is intentionally not a clone of Apple's personalized HRTF, which is not
 available to Windows applications.
 
-Windows Sonic is disabled only when it is actually enabled and SoundStage is
+Windows Sonic is disabled only when it is actually enabled and SSAP3 is
 selected, preventing double HRTF processing. ASIO/WASAPI exclusive clients may
 bypass the endpoint effect.
 
@@ -147,10 +147,10 @@ blindly. The spatial installer:
 
 1. discovers AirPods A2DP render endpoints;
 2. saves original SFX/MFX/EFX registrations under
-   `HKLM\SOFTWARE\SoundStage\SpatialAudio\OriginalEffects`;
+   `HKLM\SOFTWARE\SSAP3\SpatialAudio\OriginalEffects`;
 3. rejects a recursive Equalizer APO backup;
 4. configures Equalizer APO to chain the original effect;
-5. attaches the SoundStage post-mix renderer;
+5. attaches the SSAP3 post-mix renderer;
 6. removes a cached disable-enhancements property while Windows Audio is
    stopped;
 7. restarts Windows Audio.
@@ -159,7 +159,7 @@ The uninstaller restores the exact saved registrations.
 
 ## Installer and recovery state
 
-`C:\ProgramData\SoundStage\install-state.json` records:
+`C:\ProgramData\SSAP3\install-state.json` records:
 
 - certificate thumbprint;
 - whether Test Mode was already active;
@@ -172,7 +172,7 @@ Test Mode configuration the user already had.
 
 ## Threading and process behavior
 
-- A named mutex enforces one SoundStage UI instance.
+- A named mutex enforces one SSAP3 UI instance.
 - A named event asks the existing instance to reveal itself.
 - Tray events are marshaled onto the WPF dispatcher.
 - A four-second timer reconciles the classic paired-device state and retries a

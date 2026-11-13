@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.4.0 — Compatibility and diagnostics
+## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
+
+- Renamed the product to **SSAP3** (Spatial Sound for AirPods Pro 3). This
+  covers assemblies, namespaces, executables, driver, DSP, installer and
+  brand mark. Upstream attribution is kept in `THIRD_PARTY.md`.
+- Added the repository audit: `ARCHITECTURE_AUDIT.md`, `SECURITY_AUDIT.md`,
+  `HARDWARE_COMPATIBILITY.md`, `IMPLEMENTATION_ROADMAP.md` and
+  `DEVELOPMENT_STATUS.md`.
+- Enabled the .NET security analyzers (`AnalysisModeSecurity=All`) as build
+  errors. P/Invokes now load native DLLs from System32 only, and AES usage
+  is confined to a validated single-block helper.
+- The app manifest now declares `asInvoker`, so the app never runs elevated.
+
+## SoundStage 0.4.0 (upstream) — Compatibility and diagnostics
 
 - Fixed a boot-state bug that could leave Test Mode active for one session but
   disabled in BCD for the next restart, causing driver problem code 52.
@@ -20,7 +33,7 @@
   TP-Link/BARROT adapters, Apple AAP/UARP presence, and the A2DP/HFP route.
 - Kept the v0.3 spatial renderer and head-tracking tuning unchanged.
 
-## 0.3.0 — Experimental prerelease
+## SoundStage 0.3.0 (upstream) — Experimental prerelease
 
 - Added a compact English WPF tray control center.
 - Added ANC, Transparency, Adaptive, and Off AAP controls.

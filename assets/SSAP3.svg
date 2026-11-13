@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"
+     role="img" aria-labelledby="title description">
+  <title id="title">SSAP3</title>
+  <desc id="description">A listener between two generic earbuds, with two
+    arcs for a virtual soundstage anchored in front of them.</desc>
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="248" y2="248"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#242E56"/>
+      <stop offset="1" stop-color="#0C1122"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <g fill="none" stroke="#5CD6F6" stroke-width="11" stroke-linecap="round">
+    <!-- Arcs centred on the listener at (128,150). -->
+    <path d="M59.6 88.4 A92 92 0 0 1 196.4 88.4"/>
+    <path d="M87.9 105.4 A60 60 0 0 1 168.1 105.4" stroke-opacity="0.73"/>
+  </g>
+  <g stroke="#F6F9FF" stroke-width="17" stroke-linecap="round">
+    <path d="M70 168 L78 214"/>
+    <path d="M186 168 L178 214"/>
+  </g>
+  <g fill="#F6F9FF">
+    <circle cx="70" cy="168" r="23"/>
+    <circle cx="186" cy="168" r="23"/>
+  </g>
+  <circle cx="128" cy="150" r="12" fill="#5CD6F6"/>
+</svg>

@@ -9,14 +9,14 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $workspaceRoot = Split-Path $repositoryRoot -Parent
 $projectRoot = Split-Path $workspaceRoot -Parent
-$packageRoot = Join-Path $projectRoot 'outputs\SoundStage-Setup'
+$packageRoot = Join-Path $projectRoot 'outputs\SSAP3-Setup'
 $releaseRoot = Join-Path $projectRoot 'outputs'
-$publishRoot = Join-Path $workspaceRoot 'soundstage-app-publish'
+$publishRoot = Join-Path $workspaceRoot 'ssap3-app-publish'
 $certificateStageRoot =
-    Join-Path $workspaceRoot 'soundstage-package-stage\driver'
+    Join-Path $workspaceRoot 'ssap3-package-stage\driver'
 $certificatePath =
-    Join-Path $certificateStageRoot 'soundstage-local-test-driver.cer'
-$setupPath = Join-Path $releaseRoot 'SoundStage-Setup.exe'
+    Join-Path $certificateStageRoot 'ssap3-dev-test-driver.cer'
+$setupPath = Join-Path $releaseRoot 'SSAP3-Setup.exe'
 $iscc = @(
     'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     'C:\Program Files\Inno Setup 6\ISCC.exe',
@@ -81,8 +81,8 @@ if ([string]::IsNullOrWhiteSpace($dotnet)) {
 
 foreach ($requiredPath in @(
         $dotnet,
-        (Join-Path $repositoryRoot 'src\SoundStage.App\SoundStage.App.csproj'),
-        (Join-Path $PSScriptRoot 'SoundStage.iss')
+        (Join-Path $repositoryRoot 'src\SSAP3.App\SSAP3.App.csproj'),
+        (Join-Path $PSScriptRoot 'SSAP3.iss')
     )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required installer build input was not found: $requiredPath"
@@ -111,7 +111,7 @@ if (-not $SkipTests) {
             '--project',
             (Join-Path `
                 $repositoryRoot `
-                'tests\SoundStage.Core.SmokeTests\SoundStage.Core.SmokeTests.csproj'),
+                'tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj'),
             '-c',
             'Release')
     & (Join-Path $repositoryRoot 'audio\test-spatializer.ps1')
@@ -120,7 +120,7 @@ if (-not $SkipTests) {
 $certificate = Get-ChildItem -Path Cert:\CurrentUser\My |
     Where-Object {
         $_.HasPrivateKey -and
-        $_.Subject -eq 'CN=SoundStage Local Test Driver' -and
+        $_.Subject -eq 'CN=SSAP3 Development Test Driver' -and
         $_.NotAfter -gt (Get-Date)
     } |
     Sort-Object NotAfter -Descending |
@@ -130,14 +130,14 @@ if ($null -eq $certificate) {
     $certificate = Get-ChildItem -Path Cert:\CurrentUser\My |
         Where-Object {
             $_.HasPrivateKey -and
-            $_.Subject -eq 'CN=SoundStage Local Test Driver' -and
+            $_.Subject -eq 'CN=SSAP3 Development Test Driver' -and
             $_.NotAfter -gt (Get-Date)
         } |
         Sort-Object NotAfter -Descending |
         Select-Object -First 1
 }
 if ($null -eq $certificate) {
-    throw 'The SoundStage test-signing certificate could not be created.'
+    throw 'The SSAP3 test-signing certificate could not be created.'
 }
 
 Export-Certificate `
@@ -160,7 +160,7 @@ Invoke-Checked `
         'publish',
         (Join-Path `
             $repositoryRoot `
-            'src\SoundStage.App\SoundStage.App.csproj'),
+            'src\SSAP3.App\SSAP3.App.csproj'),
         '-c',
         'Release',
         '-r',
@@ -185,8 +185,8 @@ Copy-Item -Path (Join-Path $publishRoot '*') `
     -Force
 
 foreach ($fileName in @(
-        'Install-SoundStage.ps1',
-        'Uninstall-SoundStage.ps1',
+        'Install-SSAP3.ps1',
+        'Uninstall-SSAP3.ps1',
         'Install-SpatialAudioEngine.ps1',
         'Uninstall-SpatialAudioEngine.ps1',
         'README.md',
@@ -237,7 +237,7 @@ Invoke-Checked `
         "/DSourceRoot=$packageRoot",
         "/DOutputRoot=$releaseRoot",
         "/DAppVersion=$Version",
-        (Join-Path $PSScriptRoot 'SoundStage.iss'))
+        (Join-Path $PSScriptRoot 'SSAP3.iss'))
 
 if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
     throw "Inno Setup did not create $setupPath."
@@ -247,7 +247,7 @@ $setupHash = Get-FileHash -LiteralPath $setupPath -Algorithm SHA256
 $setupChecksumPath = "$setupPath.sha256"
 Set-Content `
     -LiteralPath $setupChecksumPath `
-    -Value ("{0} *SoundStage-Setup.exe" -f $setupHash.Hash) `
+    -Value ("{0} *SSAP3-Setup.exe" -f $setupHash.Hash) `
     -Encoding ASCII
 Write-Output "Built: $setupPath"
 Write-Output "SHA256: $($setupHash.Hash)"

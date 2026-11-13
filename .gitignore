@@ -14,14 +14,21 @@ audio/obj/
 *.obj
 
 ui-preview*.png
-soundstage-validation*.png
+ssap3-validation*.png
 third_party/SoundVolumeView/devices*.csv
 third_party/SoundVolumeView/devices*.json
 
-soundstage-package-stage/
-soundstage-publish-stage*/
+ssap3-package-stage/
+ssap3-publish-stage*/
 outputs/
 
 *.pfx
 *.pvk
 *.snk
+
+artifacts/
+TestResults/
+*.trx
+coverage*/
+*.etl
+*.dmp

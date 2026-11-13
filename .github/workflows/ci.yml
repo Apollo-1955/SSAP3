@@ -21,12 +21,12 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Build application
-        run: dotnet build .\src\SoundStage.App\SoundStage.App.csproj -c Release
+        run: dotnet build .\src\SSAP3.App\SSAP3.App.csproj -c Release
 
       - name: Run managed smoke tests
         run: >-
           dotnet run
-          --project .\tests\SoundStage.Core.SmokeTests\SoundStage.Core.SmokeTests.csproj
+          --project .\tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj
           -c Release
 
       - name: Build spatializer
@@ -51,8 +51,8 @@ jobs:
         shell: powershell
         run: |
           Add-Type -AssemblyName System.Drawing
-          $pngPath = '.\assets\soundstage-mark.png'
-          $icoPath = '.\assets\SoundStage.ico'
+          $pngPath = '.\assets\ssap3-mark.png'
+          $icoPath = '.\assets\SSAP3.ico'
           $png = [System.Drawing.Image]::FromFile($pngPath)
           try {
             if ($png.Width -ne 512 -or $png.Height -ne 512) {

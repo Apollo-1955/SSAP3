@@ -1,4 +1,4 @@
-# Contributing to SoundStage
+# Contributing to SSAP3
 
 Contributions are welcome, especially:
 
@@ -19,8 +19,8 @@ Contributions are welcome, especially:
 5. Run:
 
    ```powershell
-   dotnet build .\src\SoundStage.App\SoundStage.App.csproj -c Release
-   dotnet run --project .\tests\SoundStage.Core.SmokeTests\SoundStage.Core.SmokeTests.csproj -c Release
+   dotnet build .\src\SSAP3.App\SSAP3.App.csproj -c Release
+   dotnet run --project .\tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj -c Release
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\build-spatializer.ps1
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\test-spatializer.ps1
    ```

@@ -3,7 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
-$sourceRoot = Join-Path $PSScriptRoot 'SoundStageSpatializer'
+$sourceRoot = Join-Path $PSScriptRoot 'SSAP3Spatializer'
 $binaryRoot = Join-Path $PSScriptRoot 'bin'
 $objectRoot = Join-Path $PSScriptRoot 'obj'
 $vswhere =
@@ -49,10 +49,10 @@ foreach ($requiredPath in @($compiler, $linker, $sdkVersion)) {
 New-Item -ItemType Directory -Force -Path $binaryRoot, $objectRoot |
     Out-Null
 
-$source = Join-Path $sourceRoot 'soundstage_spatializer.cpp'
-$object = Join-Path $objectRoot 'soundstage_spatializer.obj'
-$output = Join-Path $binaryRoot 'SoundStageSpatializer.dll'
-$pdb = Join-Path $binaryRoot 'SoundStageSpatializer.pdb'
+$source = Join-Path $sourceRoot 'ssap3_spatializer.cpp'
+$object = Join-Path $objectRoot 'ssap3_spatializer.obj'
+$output = Join-Path $binaryRoot 'SSAP3Spatializer.dll'
+$pdb = Join-Path $binaryRoot 'SSAP3Spatializer.pdb'
 $sdkInclude = Join-Path $sdkRoot "Include\$sdkVersion"
 $sdkLib = Join-Path $sdkRoot "Lib\$sdkVersion"
 

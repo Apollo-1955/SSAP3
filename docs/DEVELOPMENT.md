@@ -1,4 +1,4 @@
-# Developing SoundStage
+# Developing SSAP3
 
 ## Toolchain
 
@@ -17,14 +17,14 @@ warnings as errors.
 ## Build the managed application
 
 ```powershell
-dotnet restore .\src\SoundStage.App\SoundStage.App.csproj
-dotnet build .\src\SoundStage.App\SoundStage.App.csproj -c Release
+dotnet restore .\src\SSAP3.App\SSAP3.App.csproj
+dotnet build .\src\SSAP3.App\SSAP3.App.csproj -c Release
 ```
 
 Create a self-contained single-file build:
 
 ```powershell
-dotnet publish .\src\SoundStage.App\SoundStage.App.csproj `
+dotnet publish .\src\SSAP3.App\SSAP3.App.csproj `
   -c Release `
   -r win-x64 `
   --self-contained true `
@@ -44,7 +44,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\assets\build-icons.ps1
 ```
 
-`assets/SoundStage.svg` is the editable vector source.
+`assets/SSAP3.svg` is the editable vector source.
 GDI+ rasterization can differ slightly between Windows builds, so CI validates
 the generated formats and dimensions instead of requiring byte-identical PNG
 and ICO output across runner images.
@@ -72,7 +72,7 @@ Steinberg VST2 SDK.
 
 ```powershell
 dotnet run `
-  --project .\tests\SoundStage.Core.SmokeTests\SoundStage.Core.SmokeTests.csproj `
+  --project .\tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj `
   -c Release
 ```
 
@@ -120,7 +120,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 Build and run the read-only diagnostics collector:
 
 ```powershell
-dotnet run --project .\src\SoundStage.Diagnostics\SoundStage.Diagnostics.csproj `
+dotnet run --project .\src\SSAP3.Diagnostics\SSAP3.Diagnostics.csproj `
   -c Release -- --output .\artifacts\diagnostics
 ```
 
@@ -128,14 +128,14 @@ To reproduce the app's targeted Apple-profile recovery from a development
 shell:
 
 ```powershell
-dotnet run --project .\src\SoundStage.Diagnostics\SoundStage.Diagnostics.csproj `
+dotnet run --project .\src\SSAP3.Diagnostics\SSAP3.Diagnostics.csproj `
   -c Release -- --repair-control
 ```
 
 The transport probe directly exercises the user-mode driver client:
 
 ```powershell
-dotnet run --project .\src\SoundStage.TransportProbe\SoundStage.TransportProbe.csproj `
+dotnet run --project .\src\SSAP3.TransportProbe\SSAP3.TransportProbe.csproj `
   -c Release
 ```
 
@@ -155,7 +155,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 The script regenerates icons, builds and tests the managed core and spatializer,
 builds the MSVC/WDK driver, creates or reuses a local test-signing certificate,
 signs and verifies SYS/CAT, publishes the self-contained app, writes the payload
-manifest, and compiles `SoundStage-Setup.exe` with Inno Setup.
+manifest, and compiles `SSAP3-Setup.exe` with Inno Setup.
 
 Before publishing:
 

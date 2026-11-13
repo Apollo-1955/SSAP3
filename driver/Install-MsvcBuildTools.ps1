@@ -2,7 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$statusDirectory = 'C:\ProgramData\SoundStage'
+$statusDirectory = 'C:\ProgramData\SSAP3'
 $statusPath = Join-Path $statusDirectory 'msvc-buildtools-install.json'
 $logPath = Join-Path $statusDirectory 'msvc-buildtools-install.log'
 

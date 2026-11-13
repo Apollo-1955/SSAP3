@@ -1,6 +1,6 @@
 # Security
 
-SoundStage includes kernel-mode code and is experimental. Do not install binaries
+SSAP3 includes kernel-mode code and is experimental. Do not install binaries
 from untrusted forks.
 
 For security reports, contact the repository owner privately after the public

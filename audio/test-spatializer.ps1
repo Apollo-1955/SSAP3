@@ -3,8 +3,8 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $audioRoot = $PSScriptRoot
-$source = Join-Path $audioRoot 'SoundStageSpatializer\spatializer_smoke.cpp'
-$plugin = Join-Path $audioRoot 'bin\SoundStageSpatializer.dll'
+$source = Join-Path $audioRoot 'SSAP3Spatializer\spatializer_smoke.cpp'
+$plugin = Join-Path $audioRoot 'bin\SSAP3Spatializer.dll'
 $output = Join-Path $audioRoot 'obj\spatializer_smoke.exe'
 $vswhere =
     'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
@@ -22,7 +22,7 @@ $vcVars = Join-Path $visualStudioRoot 'VC\Auxiliary\Build\vcvars64.bat'
 $command = (('"{0}" && cl.exe /nologo /std:c++20 /EHsc /O2 /W4 ' +
     '/I"{1}" /Fe:"{2}" "{3}"') -f `
         $vcVars, `
-        (Join-Path $audioRoot 'SoundStageSpatializer'), `
+        (Join-Path $audioRoot 'SSAP3Spatializer'), `
         $output, `
         $source)
 & $env:ComSpec /d /s /c $command

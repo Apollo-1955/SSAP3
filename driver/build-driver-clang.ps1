@@ -13,7 +13,7 @@ $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $workspaceRoot = Split-Path $repositoryRoot -Parent
 $toolRoot = Join-Path $workspaceRoot '.llvm-toolchain-22.1.8'
 $packageRoot = Join-Path $workspaceRoot '.nuget\packages'
-$sourceRoot = Join-Path $PSScriptRoot 'SoundStageKmdf'
+$sourceRoot = Join-Path $PSScriptRoot 'Ssap3Aap'
 $objectRoot = Join-Path $sourceRoot 'obj-clang'
 $binaryRoot = Join-Path $sourceRoot 'bin-clang'
 
@@ -75,7 +75,7 @@ foreach ($fileName in @('driver.c', 'queue.c', 'transport_bth_l2cap.c')) {
 
 $kernelLibraries = Join-Path $wdk 'Lib\10.0.26100.0\km\x64'
 $wdfLibraries = Join-Path $wdk 'Lib\wdf\kmdf\x64\1.31'
-$driverPath = Join-Path $binaryRoot 'soundstage-airpods4-anc.sys'
+$driverPath = Join-Path $binaryRoot 'ssap3aap.sys'
 
 & $linker `
     /nologo /driver /subsystem:native,10.00 /entry:FxDriverEntry `
@@ -94,7 +94,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $infVerifier = Join-Path $wdk 'tools\10.0.26100.0\x64\infverif.exe'
-$infPath = Join-Path $sourceRoot 'soundstage-airpods4-anc.inf'
+$infPath = Join-Path $sourceRoot 'ssap3aap.inf'
 & $infVerifier /w $infPath
 if ($LASTEXITCODE -ne 0) {
     throw "InfVerif failed with exit code $LASTEXITCODE."

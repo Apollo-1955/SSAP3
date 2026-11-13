@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\SSAP3.Core\SSAP3.Core.csproj" />
+    <ProjectReference Include="..\SSAP3.Diagnostics\SSAP3.Diagnostics.csproj" />
+    <ProjectReference Include="..\SSAP3.Platform.Windows\SSAP3.Platform.Windows.csproj" />
+  </ItemGroup>
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>SSAP3</AssemblyName>
+    <RootNamespace>SSAP3.App</RootNamespace>
+    <AssemblyTitle>SSAP3 Control Center</AssemblyTitle>
+    <Description>SSAP3 for Windows: spatial sound and controls for AirPods Pro 3</Description>
+    <ApplicationIcon>..\..\assets\SSAP3.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="..\..\assets\SSAP3.ico">
+      <Link>Assets\SSAP3.ico</Link>
+    </Resource>
+    <Resource Include="..\..\assets\ssap3-mark.png">
+      <Link>Assets\ssap3-mark.png</Link>
+    </Resource>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\third_party\SoundVolumeView\SoundVolumeView.exe;..\..\third_party\SoundVolumeView\SoundVolumeView.chm;..\..\third_party\SoundVolumeView\readme.txt">
+      <Link>tools\SoundVolumeView\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+</Project>
