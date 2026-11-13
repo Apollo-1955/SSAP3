@@ -1,253 +1,99 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.4.0',
-    [switch]$SkipTests
+    [string]$Version = '0.5.0',
+    [switch]$SkipTests,
+    # Path to a Microsoft-signed driver package folder (ssap3aap.inf/.sys/.cat) returned
+    # by attestation signing. Without it, the package ships WITHOUT the AAP driver.
+    [string]$SignedDriverFolder,
+    # Folder with the unmodified Equalizer APO 1.4.2 x64 runtime files (optional).
+    [string]$EqualizerApoFolder
 )
 
-$ErrorActionPreference = 'Stop'
+<#
+    Builds SSAP3-Setup-<version>.exe. Unlike the upstream build, this script never
+    creates or trusts certificates and never test-signs anything (SECURITY_AUDIT.md
+    S-01/S-03). Output goes to .\artifacts\.
+#>
 
+$ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
-$workspaceRoot = Split-Path $repositoryRoot -Parent
-$projectRoot = Split-Path $workspaceRoot -Parent
-$packageRoot = Join-Path $projectRoot 'outputs\SSAP3-Setup'
-$releaseRoot = Join-Path $projectRoot 'outputs'
-$publishRoot = Join-Path $workspaceRoot 'ssap3-app-publish'
-$certificateStageRoot =
-    Join-Path $workspaceRoot 'ssap3-package-stage\driver'
-$certificatePath =
-    Join-Path $certificateStageRoot 'ssap3-dev-test-driver.cer'
-$setupPath = Join-Path $releaseRoot 'SSAP3-Setup.exe'
+$artifacts = Join-Path $repositoryRoot 'artifacts'
+$packageRoot = Join-Path $artifacts 'package'
+$dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source
 $iscc = @(
     'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     'C:\Program Files\Inno Setup 6\ISCC.exe',
     (Join-Path $env:LocalAppData 'Programs\Inno Setup 6\ISCC.exe')
-) |
-    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-    Select-Object -First 1
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 
-function Remove-BuildDirectory {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ExpectedParent
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        return
-    }
-
-    $resolvedPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $resolvedParent = [IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
-    if (-not $resolvedPath.StartsWith(
-            $resolvedParent + '\',
-            [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove build directory outside $resolvedParent`: $resolvedPath"
-    }
-
-    Remove-Item -LiteralPath $resolvedPath -Recurse -Force
-}
-
-function Invoke-Checked {
-    param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
-    )
-
+function Invoke-Checked([string]$FilePath, [string[]]$Arguments) {
     & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath failed with exit code $LASTEXITCODE."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "$FilePath failed with exit code $LASTEXITCODE." }
 }
 
-$dotnetCommand = Get-Command dotnet.exe -ErrorAction SilentlyContinue
-$dotnetCandidates = @(
-    (Join-Path $workspaceRoot '.dotnet\dotnet.exe'),
-    $(if ($null -ne $dotnetCommand) { $dotnetCommand.Source })
-) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-$dotnet = $null
-foreach ($candidate in $dotnetCandidates) {
-    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-        continue
-    }
+if (Test-Path -LiteralPath $packageRoot) { Remove-Item -LiteralPath $packageRoot -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $packageRoot, "$packageRoot\setup", "$packageRoot\docs" | Out-Null
 
-    $installedSdks = & $candidate --list-sdks 2>$null
-    if ($LASTEXITCODE -eq 0 -and @($installedSdks).Count -gt 0) {
-        $dotnet = $candidate
-        break
-    }
-}
-if ([string]::IsNullOrWhiteSpace($dotnet)) {
-    throw 'A .NET 8 SDK host was not found.'
-}
-
-foreach ($requiredPath in @(
-        $dotnet,
-        (Join-Path $repositoryRoot 'src\SSAP3.App\SSAP3.App.csproj'),
-        (Join-Path $PSScriptRoot 'SSAP3.iss')
-    )) {
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Required installer build input was not found: $requiredPath"
-    }
-}
-if ([string]::IsNullOrWhiteSpace($iscc)) {
-    throw (
-        'Inno Setup 6 was not found. Install JRSoftware.InnoSetup with winget.')
-}
-
-Remove-BuildDirectory -Path $packageRoot -ExpectedParent $releaseRoot
-Remove-BuildDirectory -Path $publishRoot -ExpectedParent $workspaceRoot
-New-Item -ItemType Directory -Force `
-    -Path $packageRoot, $releaseRoot, $publishRoot, $certificateStageRoot |
-    Out-Null
-
-& (Join-Path $repositoryRoot 'assets\build-icons.ps1')
-& (Join-Path $repositoryRoot 'audio\build-spatializer.ps1')
-& (Join-Path $repositoryRoot 'driver\build-driver-msvc.ps1')
-
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 if (-not $SkipTests) {
-    Invoke-Checked `
-        -FilePath $dotnet `
-        -Arguments @(
-            'run',
-            '--project',
-            (Join-Path `
-                $repositoryRoot `
-                'tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj'),
-            '-c',
-            'Release')
-    & (Join-Path $repositoryRoot 'audio\test-spatializer.ps1')
+    Invoke-Checked $dotnet @('test', (Join-Path $repositoryRoot 'tests\SSAP3.Core.Tests\SSAP3.Core.Tests.csproj'), '-c', 'Release')
 }
 
-$certificate = Get-ChildItem -Path Cert:\CurrentUser\My |
-    Where-Object {
-        $_.HasPrivateKey -and
-        $_.Subject -eq 'CN=SSAP3 Development Test Driver' -and
-        $_.NotAfter -gt (Get-Date)
-    } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
-if ($null -eq $certificate) {
-    & (Join-Path $repositoryRoot 'driver\New-TestSigningCertificate.ps1')
-    $certificate = Get-ChildItem -Path Cert:\CurrentUser\My |
-        Where-Object {
-            $_.HasPrivateKey -and
-            $_.Subject -eq 'CN=SSAP3 Development Test Driver' -and
-            $_.NotAfter -gt (Get-Date)
-        } |
-        Sort-Object NotAfter -Descending |
-        Select-Object -First 1
-}
-if ($null -eq $certificate) {
-    throw 'The SSAP3 test-signing certificate could not be created.'
+Invoke-Checked $dotnet @(
+    'publish', (Join-Path $repositoryRoot 'src\SSAP3.App\SSAP3.App.csproj'),
+    '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+    '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:DebugType=None', '-p:DebugSymbols=false', "-p:Version=$Version",
+    '-o', (Join-Path $packageRoot 'app'))
+
+# SoundVolumeView must match the pinned, reviewed hash (S-11).
+$svv = Join-Path $packageRoot 'app\tools\SoundVolumeView\SoundVolumeView.exe'
+if ((Get-FileHash -LiteralPath $svv -Algorithm SHA256).Hash -ne 'B5AF5BD60F7A29AF8CB4D8A566382B90F0FE07CAC97228D218CB913F3382D647') {
+    throw 'SoundVolumeView.exe does not match the pinned SHA-256 in THIRD_PARTY.md.'
 }
 
-Export-Certificate `
-    -Cert $certificate `
-    -FilePath $certificatePath `
-    -Force |
-    Out-Null
-Import-Certificate `
-    -FilePath $certificatePath `
-    -CertStoreLocation 'Cert:\CurrentUser\Root' |
-    Out-Null
-Import-Certificate `
-    -FilePath $certificatePath `
-    -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' |
-    Out-Null
-
-Invoke-Checked `
-    -FilePath $dotnet `
-    -Arguments @(
-        'publish',
-        (Join-Path `
-            $repositoryRoot `
-            'src\SSAP3.App\SSAP3.App.csproj'),
-        '-c',
-        'Release',
-        '-r',
-        'win-x64',
-        '--self-contained',
-        'true',
-        '-p:PublishSingleFile=true',
-        '-p:IncludeNativeLibrariesForSelfExtract=true',
-        '-p:DebugType=None',
-        '-p:DebugSymbols=false',
-        '-o',
-        $publishRoot)
-
-& (Join-Path $repositoryRoot 'driver\package-driver.ps1') `
-    -CertificateThumbprint $certificate.Thumbprint
-
-$packageApp = Join-Path $packageRoot 'app'
-New-Item -ItemType Directory -Force -Path $packageApp | Out-Null
-Copy-Item -Path (Join-Path $publishRoot '*') `
-    -Destination $packageApp `
-    -Recurse `
-    -Force
-
-foreach ($fileName in @(
-        'Install-SSAP3.ps1',
-        'Uninstall-SSAP3.ps1',
-        'Install-SpatialAudioEngine.ps1',
-        'Uninstall-SpatialAudioEngine.ps1',
-        'README.md',
-        'README-RU.md')) {
-    Copy-Item `
-        -LiteralPath (Join-Path $PSScriptRoot $fileName) `
-        -Destination (Join-Path $packageRoot $fileName) `
-        -Force
+foreach ($file in 'Install-SSAP3.ps1', 'Uninstall-SSAP3.ps1', 'Ssap3Setup.psm1', 'Test-Ssap3SystemState.ps1') {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $packageRoot 'setup') -Force
 }
-
-foreach ($fileName in @(
-        'LICENSE',
-        'THIRD_PARTY.md')) {
-    Copy-Item `
-        -LiteralPath (Join-Path $repositoryRoot $fileName) `
-        -Destination (Join-Path $packageRoot $fileName) `
-        -Force
+foreach ($file in 'LICENSE', 'THIRD_PARTY.md', 'README.md', 'SECURITY.md') {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot $file) -Destination (Join-Path $packageRoot 'docs') -Force
 }
-Copy-Item `
-    -LiteralPath (Join-Path $repositoryRoot 'docs\INSTALL.md') `
-    -Destination (Join-Path $packageRoot 'INSTALL.md') `
-    -Force
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\INSTALL.md') -Destination (Join-Path $packageRoot 'docs') -Force
 
-Set-Content `
-    -LiteralPath (Join-Path $packageRoot 'VERSION.txt') `
-    -Value $Version `
-    -Encoding ASCII
-
-$manifestPath = Join-Path $packageRoot 'SHA256SUMS.txt'
-$manifestLines = Get-ChildItem -LiteralPath $packageRoot -File -Recurse |
-    Where-Object { $_.FullName -ne $manifestPath } |
-    Sort-Object FullName |
-    ForEach-Object {
-        $relativePath =
-            $_.FullName.Substring($packageRoot.Length + 1).Replace('\', '/')
-        $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
-        "$hash  $relativePath"
+if ($SignedDriverFolder) {
+    $catalog = Join-Path $SignedDriverFolder 'ssap3aap.cat'
+    $signature = Get-AuthenticodeSignature -LiteralPath $catalog
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Windows Hardware Compatibility Publisher') {
+        throw "The driver catalog is not Microsoft-signed ($($signature.Status)). Production packages only carry attestation/WHQL-signed drivers."
     }
-$manifestLines | Set-Content -LiteralPath $manifestPath -Encoding ASCII
-
-if (Test-Path -LiteralPath $setupPath -PathType Leaf) {
-    Remove-Item -LiteralPath $setupPath -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'driver') | Out-Null
+    Copy-Item -Path (Join-Path $SignedDriverFolder 'ssap3aap.*') -Destination (Join-Path $packageRoot 'driver') -Force
+}
+else {
+    Write-Warning 'No Microsoft-signed driver supplied: this package installs without the AAP driver (driverless tier).'
 }
 
-Invoke-Checked `
-    -FilePath $iscc `
-    -Arguments @(
-        "/DSourceRoot=$packageRoot",
-        "/DOutputRoot=$releaseRoot",
-        "/DAppVersion=$Version",
-        (Join-Path $PSScriptRoot 'SSAP3.iss'))
-
-if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
-    throw "Inno Setup did not create $setupPath."
+$spatializer = Join-Path $repositoryRoot 'audio\bin\SSAP3Spatializer.dll'
+if ($EqualizerApoFolder -and (Test-Path -LiteralPath $spatializer)) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial\EqualizerAPO') | Out-Null
+    Copy-Item -LiteralPath $spatializer -Destination (Join-Path $packageRoot 'spatial') -Force
+    Copy-Item -Path (Join-Path $EqualizerApoFolder '*') -Destination (Join-Path $packageRoot 'spatial\EqualizerAPO') -Recurse -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'spatial\source') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'third_party\EqualizerAPO\source\EqualizerAPO-src-1.4.2.zip') -Destination (Join-Path $packageRoot 'spatial\source') -Force
+}
+else {
+    Write-Warning 'Spatial engine files not supplied: the opt-in engine task will fail cleanly if selected.'
 }
 
-$setupHash = Get-FileHash -LiteralPath $setupPath -Algorithm SHA256
-$setupChecksumPath = "$setupPath.sha256"
-Set-Content `
-    -LiteralPath $setupChecksumPath `
-    -Value ("{0} *SSAP3-Setup.exe" -f $setupHash.Hash) `
-    -Encoding ASCII
-Write-Output "Built: $setupPath"
-Write-Output "SHA256: $($setupHash.Hash)"
+& (Join-Path $repositoryRoot 'tools\release\New-Sbom.ps1') -PackageRoot $packageRoot -Version $Version -Output (Join-Path $artifacts "SSAP3-$Version.cdx.json")
+
+$manifest = Get-ChildItem -LiteralPath $packageRoot -File -Recurse | Sort-Object FullName | ForEach-Object {
+    "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.FullName.Substring($packageRoot.Length + 1).Replace('\', '/')
+}
+$manifest | Set-Content -LiteralPath (Join-Path $artifacts "SSAP3-$Version-package.sha256") -Encoding ASCII
+
+if (-not $iscc) { throw 'Inno Setup 6 (ISCC.exe) was not found.' }
+Invoke-Checked $iscc @("/DSourceRoot=$packageRoot", "/DOutputRoot=$artifacts", "/DAppVersion=$Version", (Join-Path $PSScriptRoot 'SSAP3.iss'))
+$setup = Join-Path $artifacts "SSAP3-Setup-$Version.exe"
+"{0} *{1}" -f (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash, (Split-Path $setup -Leaf) | Set-Content -LiteralPath "$setup.sha256" -Encoding ASCII
+Write-Output "Built $setup (unsigned: Authenticode signing needs the project's code-signing certificate)."

@@ -4,70 +4,172 @@ on:
   push:
   pull_request:
 
+# Least privilege: jobs only read the repository unless stated otherwise.
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
 jobs:
-  windows:
+  managed:
+    name: Managed build, tests and dependency audit
     runs-on: windows-latest
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.x
 
-      - name: Build application
-        run: dotnet build .\src\SSAP3.App\SSAP3.App.csproj -c Release
+      - name: Build (warnings and security analyzers are errors)
+        shell: pwsh
+        run: |
+          foreach ($project in 'src/SSAP3.App/SSAP3.App.csproj', 'src/SSAP3.Diagnostics/SSAP3.Diagnostics.csproj', 'src/SSAP3.TransportProbe/SSAP3.TransportProbe.csproj') {
+            dotnet build $project -c Release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
-      - name: Run managed smoke tests
-        run: >-
-          dotnet run
-          --project .\tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj
-          -c Release
+      - name: Unit, simulated and randomized-input tests (no hardware)
+        run: dotnet test tests/SSAP3.Core.Tests/SSAP3.Core.Tests.csproj -c Release --logger "trx;LogFileName=core-tests.trx" --results-directory TestResults
 
-      - name: Build spatializer
+      - name: NuGet vulnerability audit (direct and transitive)
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($project in Get-ChildItem -Recurse -Filter *.csproj -Path src, tests) {
+            $output = dotnet list $project.FullName package --vulnerable --include-transitive 2>&1 | Out-String
+            Write-Output $output
+            if ($output -match 'has the following vulnerable packages') { $failed = $true }
+          }
+          if ($failed) { throw 'Vulnerable NuGet packages found.' }
+
+      - name: SBOM (CycloneDX)
+        shell: pwsh
+        run: ./tools/release/New-Sbom.ps1 -Version "0.5.0-ci.${{ github.run_number }}" -Output artifacts/ssap3.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ssap3-managed-results
+          path: |
+            TestResults/
+            artifacts/ssap3.cdx.json
+
+  native:
+    name: Spatial engine and AAP driver (MSVC/WDK)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build spatial engine (/W4 /WX /guard:cf)
         shell: powershell
-        run: >-
-          powershell.exe -NoProfile -ExecutionPolicy Bypass
-          -File .\audio\build-spatializer.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\build-spatializer.ps1
 
-      - name: Test spatializer
+      - name: Spatial engine tests (bit-exact Off, NaN/Inf/stale rejection, click test)
         shell: powershell
-        run: >-
-          powershell.exe -NoProfile -ExecutionPolicy Bypass
-          -File .\audio\test-spatializer.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\test-spatializer.ps1
 
-      - name: Rebuild icons
+      - name: Restore pinned WDK packages
+        run: dotnet restore driver/WdkPackages.proj
+
+      - name: Build driver and run InfVerif (unsigned; never test-signed in CI)
         shell: powershell
-        run: >-
-          powershell.exe -NoProfile -ExecutionPolicy Bypass
-          -File .\assets\build-icons.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1
 
-      - name: Validate generated icons
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ssap3-native-unsigned
+          path: |
+            audio/bin/SSAP3Spatializer.dll
+            driver/Ssap3Aap/bin-msvc/ssap3aap.sys
+            driver/Ssap3Aap/bin-msvc/ssap3aap.pdb
+
+  scripts:
+    name: Installer and tooling script checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Parse every PowerShell script
         shell: powershell
         run: |
-          Add-Type -AssemblyName System.Drawing
-          $pngPath = '.\assets\ssap3-mark.png'
-          $icoPath = '.\assets\SSAP3.ico'
-          $png = [System.Drawing.Image]::FromFile($pngPath)
-          try {
-            if ($png.Width -ne 512 -or $png.Height -ne 512) {
-              throw "Unexpected PNG dimensions: $($png.Width)x$($png.Height)"
-            }
+          $bad = 0
+          Get-ChildItem -Recurse -Include *.ps1, *.psm1 -Path installer, tools, driver, audio, assets | ForEach-Object {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in $errors) { Write-Output "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
           }
-          finally {
-            $png.Dispose()
+          if ($bad -gt 0) { exit 1 }
+
+      - name: Forbidden operations in production setup
+        shell: powershell
+        run: |
+          # Production setup must never weaken the platform (SECURITY_AUDIT.md S-01/S-03).
+          $patterns = 'bcdedit\s+/set', 'Suspend-BitLocker', 'certutil.*-addstore', 'Import-Certificate', 'Cert:\\LocalMachine\\Root', 'testsigning\s+on'
+          # Test-Ssap3SystemState.ps1 is excluded: it only READS the Root store to detect leftovers.
+          $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1 -Pattern $patterns
+          if ($hits) { $hits | ForEach-Object { Write-Output "::error file=$($_.Path),line=$($_.LineNumber)::$($_.Line.Trim())" }; exit 1 }
+
+      - name: System-state verifier runs read-only on a clean runner
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\Test-Ssap3SystemState.ps1 -Verify
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [csharp, c-cpp]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: manual
+          queries: security-extended
+      - name: Build for analysis
+        shell: powershell
+        run: |
+          if ('${{ matrix.language }}' -eq 'csharp') {
+            dotnet build src/SSAP3.App/SSAP3.App.csproj -c Release
+            dotnet build src/SSAP3.TransportProbe/SSAP3.TransportProbe.csproj -c Release
+          } else {
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\build-spatializer.ps1
           }
-          $icon = New-Object System.Drawing.Icon($icoPath)
-          try {
-            if ($icon.Width -lt 16 -or $icon.Height -lt 16) {
-              throw "The generated ICO has no usable image."
-            }
-          }
-          finally {
-            $icon.Dispose()
-          }
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+
+  secrets:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate

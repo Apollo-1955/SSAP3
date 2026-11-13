@@ -1,34 +1,37 @@
+; SSAP3 Setup (Inno Setup 6).
+;
+; Production policy: no Test Mode, no BCD/Secure Boot/BitLocker changes, no
+; certificates. The elevated payload lives in {app} (Program Files, admin-only)
+; and never in a user-writable folder (SECURITY_AUDIT.md S-01/S-02/S-03).
+
 #ifndef SourceRoot
   #error SourceRoot must point to a complete SSAP3 package directory.
 #endif
-
 #ifndef OutputRoot
   #error OutputRoot must point to the release output directory.
 #endif
-
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #define AppVersion "0.5.0"
 #endif
 
 [Setup]
-AppId={{FE338C63-78A6-4F57-83B5-B1E5A48A9645}
+AppId={{6B2E0B8F-4C1D-4E0A-9C3B-5A1F0D2E7C41}
 AppName=SSAP3
 AppVerName=SSAP3 {#AppVersion}
 AppVersion={#AppVersion}
 AppPublisher=SSAP3 contributors
 AppPublisherURL=https://github.com/Apollo-1955/SSAP3
 AppSupportURL=https://github.com/Apollo-1955/SSAP3/issues
-AppUpdatesURL=https://github.com/Apollo-1955/SSAP3/releases
 DefaultDirName={autopf}\SSAP3
+DisableDirPage=yes
 DefaultGroupName=SSAP3
 DisableProgramGroupPage=yes
-DisableWelcomePage=no
 LicenseFile=..\LICENSE
 SetupIconFile=..\assets\SSAP3.ico
 UninstallDisplayIcon={app}\SSAP3.exe
 UninstallDisplayName=SSAP3 for Windows
 OutputDir={#OutputRoot}
-OutputBaseFilename=SSAP3-Setup
+OutputBaseFilename=SSAP3-Setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -44,87 +47,88 @@ VersionInfoCompany=SSAP3 contributors
 VersionInfoDescription=SSAP3 for Windows Setup
 VersionInfoProductName=SSAP3
 VersionInfoProductVersion={#AppVersion}
-VersionInfoCopyright=Copyright (C) 2026 SSAP3 contributors
 
-[InstallDelete]
-Type: filesandordirs; Name: "{commonappdata}\SSAP3\package"
+[Tasks]
+Name: "autostart"; Description: "Start SSAP3 when I sign in"; Flags: checkedonce
+Name: "spatialengine"; Description: "Install the system-wide 3D soundstage engine (advanced; read the note on the next page)"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
-Source: "{#SourceRoot}\*"; DestDir: "{commonappdata}\SSAP3\package"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\setup\*"; DestDir: "{app}\setup"; Flags: ignoreversion
+Source: "{#SourceRoot}\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceRoot}\spatial\*"; DestDir: "{app}\spatial"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+Source: "{#SourceRoot}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion
+
+[Icons]
+Name: "{autoprograms}\SSAP3"; Filename: "{app}\SSAP3.exe"; Comment: "SSAP3 Control Center"
+Name: "{autodesktop}\SSAP3"; Filename: "{app}\SSAP3.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\SSAP3.exe"; Description: "Open SSAP3"; Flags: nowait postinstall skipifsilent; Check: IsSsap3Ready
+Filename: "{app}\SSAP3.exe"; Description: "Open SSAP3"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{commonappdata}\SSAP3\package\Uninstall-SSAP3.ps1"" -NoRelaunch -KeepInstallDirectory"; RunOnceId: "Ssap3SystemCleanup"; Flags: runhidden waituntilterminated
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{commonappdata}\SSAP3\package"
-Type: files; Name: "{commonappdata}\SSAP3\restart-required.flag"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\setup\Uninstall-SSAP3.ps1"" {code:UninstallArguments}"; RunOnceId: "SSAP3SystemCleanup"; Flags: runhidden waituntilterminated
 
 [Code]
-function IsSsap3Ready(): Boolean;
+var
+  SpatialNotePage: TOutputMsgMemoWizardPage;
+  RemoveUserData: Boolean;
+
+procedure InitializeWizard();
 begin
-  Result :=
-    FileExists(ExpandConstant('{app}\SSAP3.exe')) and
-    not FileExists(
-      ExpandConstant('{commonappdata}\SSAP3\restart-required.flag'));
+  SpatialNotePage := CreateOutputMsgMemoPage(wpSelectTasks,
+    'System-wide 3D soundstage engine',
+    'Only relevant if you selected the advanced engine task.',
+    'What this changes on Windows:',
+    'The engine runs inside the Windows audio service through the Equalizer APO host.' + #13#10 +
+    'Equalizer APO requires the registry value DisableProtectedAudioDG=1, which turns off' + #13#10 +
+    'Windows'' signature check for audio processing components for all audio devices.' + #13#10 + #13#10 +
+    'SSAP3 records the previous value and every audio setting it changes, and restores them' + #13#10 +
+    'exactly when you uninstall. Secure Boot, Memory Integrity, Defender and driver signing are' + #13#10 +
+    'never changed. If you do not want this trade-off, go back and leave the task unchecked;' + #13#10 +
+    'the rest of SSAP3 still works.');
 end;
 
-function NeedRestart(): Boolean;
+function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  Result := FileExists(
-    ExpandConstant('{commonappdata}\SSAP3\restart-required.flag'));
+  Result := (PageID = SpatialNotePage.ID) and not WizardIsTaskSelected('spatialengine');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  PowerShellPath: String;
-  InstallerScript: String;
   Parameters: String;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
-  begin
     exit;
-  end;
 
-  PowerShellPath :=
-    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  InstallerScript :=
-    ExpandConstant(
-      '{commonappdata}\SSAP3\package\Install-SSAP3.ps1');
-  Parameters :=
-    '-NoProfile -ExecutionPolicy Bypass -File "' +
-    InstallerScript + '" -NoRelaunch';
+  Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\setup\Install-SSAP3.ps1') + '" -Version "{#AppVersion}"';
+  if WizardIsTaskSelected('spatialengine') then
+    Parameters := Parameters + ' -EnableSpatialEngine';
+  if WizardIsTaskSelected('autostart') then
+    Parameters := Parameters + ' -Autostart';
 
-  WizardForm.StatusLabel.Caption :=
-    'Installing the SSAP3 app, driver, and spatial audio engine...';
-  if not Exec(
-      PowerShellPath,
-      Parameters,
-      '',
-      SW_HIDE,
-      ewWaitUntilTerminated,
-      ResultCode) then
-  begin
-    RaiseException('SSAP3 system installer could not be started.');
-  end;
+  WizardForm.StatusLabel.Caption := 'Configuring SSAP3...';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    RaiseException('SSAP3 system configuration could not be started.');
   if ResultCode <> 0 then
-  begin
-    RaiseException(
-      'SSAP3 system installation failed with exit code ' +
-      IntToStr(ResultCode) + '.' + #13#10 +
-      'Review C:\ProgramData\SSAP3\install.log.');
-  end;
+    RaiseException('SSAP3 system configuration failed and was rolled back.' + #13#10 +
+      'Details: ' + ExpandConstant('{app}\setup\install.log'));
+end;
 
-  if NeedRestart() then
-  begin
-    MsgBox(
-      'Windows Test Mode is now prepared.' + #13#10 + #13#10 +
-      'Restart Windows, then run this same SSAP3-Setup.exe again ' +
-      'to install the driver and finish setup.',
-      mbInformation,
-      MB_OK);
-  end;
+function InitializeUninstall(): Boolean;
+begin
+  RemoveUserData := MsgBox('Also delete your SSAP3 settings, logs and reports?' + #13#10 + #13#10 +
+    'Choose No for a standard uninstall that keeps them.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  Result := True;
+end;
+
+function UninstallArguments(Param: String): String;
+begin
+  if RemoveUserData then
+    Result := '-RemoveUserData'
+  else
+    Result := '';
 end;

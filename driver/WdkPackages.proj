@@ -1,0 +1,17 @@
+<!--
+  Restores the Windows Driver Kit and Windows SDK C++ NuGet packages into the NuGet
+  global packages folder, where driver\build-driver-msvc.ps1 expects them:
+    dotnet restore driver\WdkPackages.proj
+  Versions are pinned exactly.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageDownload Include="Microsoft.Windows.WDK.x64" Version="[10.0.26100.6584]" />
+    <PackageDownload Include="Microsoft.Windows.SDK.CPP" Version="[10.0.26100.1]" />
+  </ItemGroup>
+</Project>

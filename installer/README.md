@@ -1,42 +1,16 @@
-# SSAP3 setup payload
+# SSAP3 installer
 
-The public release is distributed as one `SSAP3-Setup.exe`. It contains:
+| File | Purpose |
+| --- | --- |
+| `SSAP3.iss` | Inno Setup script: UI, optional tasks, file copy to `%ProgramFiles%\SSAP3`, uninstaller entry |
+| `Install-SSAP3.ps1` | Elevated system-configuration step, run by Setup from `%ProgramFiles%\SSAP3\setup` |
+| `Uninstall-SSAP3.ps1` | Reverts every recorded change. Idempotent. `-RemoveUserData` for a complete uninstall |
+| `Ssap3Setup.psm1` | Shared engine: manifest, protected ACLs, registry record/restore, driver and spatial-engine steps, undo |
+| `Test-Ssap3SystemState.ps1` | Read-only before/after integrity verifier |
+| `build-installer.ps1` | Builds `artifacts\SSAP3-Setup-<version>.exe`, package hashes and the SBOM |
 
-- the self-contained x64 SSAP3 tray application;
-- the test-signed KMDF Apple AAP/UARP profile driver;
-- the SSAP3 binaural spatializer;
-- the required Equalizer APO runtime and corresponding source archive;
-- reversible install, migration, and uninstall scripts;
-- licenses, documentation, and a SHA-256 payload manifest.
+Policy: no Test Mode, BCD, Secure Boot, BitLocker or certificate changes.
+The AAP driver is included only from a Microsoft-signed package. The
+system-wide audio engine is opt-in.
 
-## Install
-
-1. Pair and connect the AirPods.
-2. Disable Secure Boot in UEFI.
-3. Run `SSAP3-Setup.exe` as administrator.
-4. Restart Windows when requested.
-5. Run the same `SSAP3-Setup.exe` again.
-
-The second run installs the app, control-profile driver, and spatial engine. Existing
-endpoint effects are backed up before SSAP3 is attached. Pre-SSAP3
-development builds are migrated automatically.
-
-If Windows later loses the Apple control PDO while audio remains connected,
-use **Repair** in the tray panel. **Report** creates a local diagnostic ZIP in
-`Documents\SSAP3\Reports`.
-
-## Audio profiles
-
-Use `AirPods Stereo` for high-quality playback. Classic Bluetooth cannot carry
-high-quality A2DP output and the AirPods Hands-Free microphone simultaneously,
-so use a separate microphone for Discord and games.
-
-## Uninstall
-
-Open Windows **Settings → Apps**, select **SSAP3**, and click
-**Uninstall**. Original endpoint effects, the driver, certificate, shortcuts,
-autostart, and Test Mode state are restored or removed as appropriate.
-
-See `INSTALL.md` or
-[the complete installation guide](../docs/INSTALL.md) for security warnings,
-verification, and recovery instructions.
+User-facing instructions are in [docs/INSTALL.md](../docs/INSTALL.md).

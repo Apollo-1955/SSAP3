@@ -4,8 +4,8 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
-$workspaceRoot = Split-Path $repositoryRoot -Parent
-$packageRoot = Join-Path $workspaceRoot '.nuget\packages'
+# WDK/SDK NuGet packages restored by: dotnet restore driver\WdkPackages.proj
+$packageRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $env:USERPROFILE '.nuget\packages' }
 $sourceRoot = Join-Path $PSScriptRoot 'Ssap3Aap'
 $objectRoot = Join-Path $sourceRoot 'obj-msvc'
 $binaryRoot = Join-Path $sourceRoot 'bin-msvc'
