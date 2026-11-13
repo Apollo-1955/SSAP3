@@ -33,7 +33,15 @@ public partial class App : System.Windows.Application
 
         _mainWindow = new MainWindow();
         MainWindow = _mainWindow;
-        _mainWindow.Show();
+        if (e.Args.Any(argument => argument.Equals("--tray", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Sign-in autostart: run in the notification area without popping the panel.
+            _mainWindow.InitializeInBackground();
+        }
+        else
+        {
+            _mainWindow.Show();
+        }
 
         _showWindowRegistration = ThreadPool.RegisterWaitForSingleObject(
             _showWindowEvent,

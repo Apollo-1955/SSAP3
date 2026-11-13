@@ -16,4 +16,5 @@ public sealed record AirPodsAdvertisementStatus(
     bool IsCaseCharging,
     bool LidOpen,
     string Color,
-    string ConnectionState);
+    string ConnectionState,
+    int ModelId = 0);

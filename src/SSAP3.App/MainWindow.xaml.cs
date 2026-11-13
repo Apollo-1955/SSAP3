@@ -1,74 +1,79 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using SSAP3.App.Services;
 using SSAP3.Core;
+using SSAP3.Core.Aacp;
+using SSAP3.Core.Connection;
+using SSAP3.Core.Conversation;
+using SSAP3.Core.Motion;
+using SSAP3.Core.Spatial;
 using SSAP3.Diagnostics;
 using SSAP3.Platform.Windows;
 using Brush = System.Windows.Media.Brush;
+using Button = System.Windows.Controls.Button;
 using Brushes = System.Windows.Media.Brushes;
 using Drawing = System.Drawing;
-using Point = System.Windows.Point;
 using RadioButton = System.Windows.Controls.RadioButton;
 using WinForms = System.Windows.Forms;
 
 namespace SSAP3.App;
 
+/// <summary>
+/// SSAP3 Control Center tray panel. It only renders service snapshots and
+/// forwards commands; all Bluetooth, motion and engine work lives in
+/// <see cref="AirPodsService"/>.
+/// </summary>
 public partial class MainWindow : Window
 {
-    private readonly WindowsBleAirPodsScanner _scanner = new();
-    private readonly WindowsSpatialAudioController _spatialAudio = new();
-    private readonly HeadTrackingAudioStateWriter _headTrackingAudioState = new();
-    private readonly SemaphoreSlim _driverGate = new(1, 1);
-    private readonly HeadTrackingFrameParser _headTrackingParser = new();
-    private readonly AirPodsBatteryPacketParser _batteryPacketParser = new();
-    private readonly Ssap3UserSettings _settings = Ssap3UserSettings.Load();
-    private readonly WinForms.NotifyIcon _trayIcon;
-    private readonly DispatcherTimer _connectionTimer;
+    private static readonly TimeSpan AacpBatteryFreshness = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan AdvertisementFreshness = TimeSpan.FromSeconds(45);
 
-    private Ssap3DriverAacpClient? _driverClient;
-    private CancellationTokenSource? _motionCancellation;
-    private string? _airPodsAddress;
-    private bool _aacpInitialized;
+    private readonly Ssap3UserSettings _settings = Ssap3UserSettings.Load();
+    private readonly WindowsBleAirPodsScanner _scanner = new();
+    private readonly WindowsSpatialAudioController _windowsSpatial = new();
+    private readonly AdvertisementFilter _advertisementFilter = new();
+    private readonly AirPodsService _service;
+    private readonly WinForms.NotifyIcon _trayIcon;
+
+    private ServiceSnapshot? _snapshot;
+    private AirPodsAdvertisementStatus? _advertisement;
+    private DateTimeOffset _advertisementAt;
+    private string? _filterAddress;
+    private bool _uiUpdating;
+    private bool _modeRequestInFlight;
+    private string? _modeResultText;
     private bool _allowClose;
-    private bool _uiReady;
     private bool _isAnimatingOut;
     private long _animationGeneration;
-    private float _smoothedYaw;
-    private float _smoothedPitch;
-    private float _trackingCenterYaw;
-    private float _trackingCenterPitch;
-    private int _trackingCenterSamples;
     private DateTime _ignoreDeactivationUntil;
-    private DateTime _lastControlRepairAttempt;
-    private DateTime _lastAdvertisementReceived;
-    private bool _airPodsClassicConnected;
-    private bool _repairInProgress;
-    private bool _connectionRefreshInProgress;
-    private bool _motionReaderRunning;
+    private SettingsWindow? _settingsWindow;
 
     public MainWindow()
     {
         InitializeComponent();
+        _service = new AirPodsService(_settings);
+        _service.Updated += Service_OnUpdated;
         _trayIcon = CreateTrayIcon();
-        _connectionTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(4),
-        };
-        _connectionTimer.Tick += ConnectionTimer_OnTick;
         _scanner.AdvertisementReceived += Scanner_OnAdvertisementReceived;
         _scanner.StatusChanged += Scanner_OnStatusChanged;
         Loaded += MainWindow_OnLoaded;
         Closing += MainWindow_OnClosing;
         Closed += MainWindow_OnClosed;
         Deactivated += MainWindow_OnDeactivated;
-        Ssap3AppLog.Write("SSAP3 0.4.0 process started.");
+        Ssap3AppLog.Write("SSAP3 Control Center started.");
     }
+
+    internal AirPodsService Service => _service;
+
+    internal Ssap3UserSettings Settings => _settings;
+
+    internal ServiceSnapshot? LatestSnapshot => _snapshot;
 
     public void ShowFromTray()
     {
@@ -81,7 +86,6 @@ public partial class MainWindow : Window
         }
 
         PositionNearTray();
-        ShowInTaskbar = false;
         _ignoreDeactivationUntil = DateTime.UtcNow.AddSeconds(1);
         Activate();
         Topmost = true;
@@ -107,24 +111,42 @@ public partial class MainWindow : Window
         }
 
         _allowClose = true;
-        _motionCancellation?.Cancel();
         _trayIcon.Visible = false;
+        _settingsWindow?.Close();
         Close();
     }
 
-    private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
+    private bool _initialized;
+
+    /// <summary>Starts the service and scanner without showing the panel (sign-in autostart).</summary>
+    public void InitializeInBackground() => Initialize();
+
+    private void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
     {
         PositionNearTray();
         _ignoreDeactivationUntil = DateTime.UtcNow.AddSeconds(1);
-        ApplySavedNoiseMode();
-        UpdateCaseBattery(level: null, charging: false);
-        LoadRememberedAirPods();
-        StartScanner();
-        _uiReady = true;
+        Initialize();
         AnimateIn();
-        _connectionTimer.Start();
-        await RepairControlPathAsync(force: false);
-        await RefreshSpatialStatusAsync();
+    }
+
+    private void Initialize()
+    {
+        if (_initialized)
+        {
+            return;
+        }
+
+        _initialized = true;
+        _uiUpdating = true;
+        SelectSpatialMode(_settings.SpatialMode);
+        ConversationToggle.IsChecked = _settings.ConversationAwarenessEnabled;
+        _uiUpdating = false;
+        _service.Start();
+        StartScanner();
+        if (_settings.SpatialMode != SpatialEngineMode.Off)
+        {
+            _ = DisableWindowsSonicIfEnabledAsync();
+        }
     }
 
     private void MainWindow_OnClosing(object? sender, CancelEventArgs e)
@@ -140,42 +162,32 @@ public partial class MainWindow : Window
 
     private void MainWindow_OnClosed(object? sender, EventArgs e)
     {
-        _motionCancellation?.Cancel();
-        _motionCancellation?.Dispose();
-        _connectionTimer.Stop();
-        _connectionTimer.Tick -= ConnectionTimer_OnTick;
         _scanner.AdvertisementReceived -= Scanner_OnAdvertisementReceived;
         _scanner.StatusChanged -= Scanner_OnStatusChanged;
         _scanner.Dispose();
-        _driverClient?.Dispose();
-        _headTrackingAudioState.Dispose();
-        _driverGate.Dispose();
+        _service.Updated -= Service_OnUpdated;
+        _service.Dispose();
+        _settings.Save();
         _trayIcon.Dispose();
-        Ssap3AppLog.Write("SSAP3 process stopped.");
+        Ssap3AppLog.Write("SSAP3 Control Center stopped.");
     }
 
     private async void MainWindow_OnDeactivated(object? sender, EventArgs e)
     {
         await Task.Delay(120);
-        var activationGrace =
-            _ignoreDeactivationUntil - DateTime.UtcNow;
-        if (activationGrace > TimeSpan.Zero)
+        var grace = _ignoreDeactivationUntil - DateTime.UtcNow;
+        if (grace > TimeSpan.Zero)
         {
-            await Task.Delay(activationGrace);
+            await Task.Delay(grace);
         }
 
-        if (!_allowClose &&
-            IsVisible &&
-            !IsActive &&
-            DateTime.UtcNow >= _ignoreDeactivationUntil)
+        if (!_allowClose && IsVisible && !IsActive && DateTime.UtcNow >= _ignoreDeactivationUntil)
         {
             HideToTray();
         }
     }
 
-    private void WindowSurface_OnMouseLeftButtonDown(
-        object sender,
-        MouseButtonEventArgs e)
+    private void WindowSurface_OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ButtonState == MouseButtonState.Pressed)
         {
@@ -183,40 +195,295 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void RefreshButton_OnClick(object sender, RoutedEventArgs e)
+    private void Service_OnUpdated(object? sender, ServiceSnapshot snapshot)
     {
-        LoadRememberedAirPods();
-        await _scanner.RestartAsync();
-        await RepairControlPathAsync(force: true);
-        _ = RefreshSpatialStatusAsync();
-        AnimateRefreshButton();
+        _snapshot = snapshot;
+        RenderSnapshot(snapshot);
+        _settingsWindow?.Render(snapshot);
     }
 
-    private void HideButton_OnClick(object sender, RoutedEventArgs e) =>
-        HideToTray();
+    private void RenderSnapshot(ServiceSnapshot snapshot)
+    {
+        _uiUpdating = true;
+        try
+        {
+            var status = snapshot.Status;
+            DeviceModel.Text = string.IsNullOrWhiteSpace(snapshot.DeviceName) ? "AirPods Pro 3" : snapshot.DeviceName;
+            ConnectionTitle.Text = status.Title;
+            ConnectionDetail.Text = status.Detail;
+            ConnectionDot.Fill = SeverityBrush(status.Severity);
 
-    private void ExitButton_OnClick(object sender, RoutedEventArgs e) =>
-        ((App)System.Windows.Application.Current).ExitApplication();
+            var controlsReady = snapshot.Status.Kind is DeviceStatusKind.ConnectedNoMotion or DeviceStatusKind.MotionStarting
+                or DeviceStatusKind.MotionStreaming or DeviceStatusKind.MotionStalled or DeviceStatusKind.MotionUnsupported;
+            SetNoiseControlsEnabled(controlsReady && !_modeRequestInFlight);
+            if (!_modeRequestInFlight)
+            {
+                SelectNoiseMode(snapshot.ReportedMode);
+                NoiseStatusText.Text = !controlsReady
+                    ? "Unavailable"
+                    : _modeResultText ?? (snapshot.ReportedMode is { } mode ? $"{Label(mode)} (reported by AirPods)" : "Waiting for AirPods");
+            }
 
-    private async void RepairButton_OnClick(object sender, RoutedEventArgs e) =>
-        await RepairControlPathAsync(force: true);
+            RenderBattery(snapshot);
+            RenderSpatial(snapshot, controlsReady);
+            RenderConversation(snapshot, controlsReady);
+            UpdateTrayText(snapshot);
+
+            if (!string.IsNullOrWhiteSpace(snapshot.Address) && snapshot.Address != _filterAddress)
+            {
+                _filterAddress = snapshot.Address;
+                _advertisementFilter.PairedModelId = WindowsBluetoothIdentity.TryGetAppleProductId(snapshot.Address, out var productId)
+                    ? AirPodsAdvertisementParser.ModelIdFromProductId(productId)
+                    : null;
+            }
+        }
+        finally
+        {
+            _uiUpdating = false;
+        }
+    }
+
+    private void RenderBattery(ServiceSnapshot snapshot)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (snapshot.AacpBattery is { } aacp && snapshot.AacpBatteryAt is { } at && now - at < AacpBatteryFreshness)
+        {
+            SetBattery(LeftBatteryText, aacp.LeftLevel, aacp.IsLeftCharging);
+            SetBattery(RightBatteryText, aacp.RightLevel, aacp.IsRightCharging);
+            UpdateCaseBattery(aacp.CaseLevel, aacp.IsCaseCharging);
+            BatterySourceText.Text = $"Reported by the AirPods · {at.ToLocalTime():t}";
+            return;
+        }
+
+        if (_advertisement is { } advert && now - _advertisementAt < AdvertisementFreshness)
+        {
+            SetBattery(LeftBatteryText, advert.LeftBattery, advert.IsLeftCharging);
+            SetBattery(RightBatteryText, advert.RightBattery, advert.IsRightCharging);
+            UpdateCaseBattery(advert.CaseBattery, advert.IsCaseCharging);
+            BatterySourceText.Text = advert.IsIdentityResolved
+                ? $"Bluetooth LE (verified) · {_advertisementAt.ToLocalTime():t}"
+                : $"Nearby {advert.Model} (Bluetooth LE, not cryptographically verified) · {_advertisementAt.ToLocalTime():t}";
+            return;
+        }
+
+        SetBattery(LeftBatteryText, null, false);
+        SetBattery(RightBatteryText, null, false);
+        UpdateCaseBattery(null, false);
+        BatterySourceText.Text = "Battery unavailable: open the case near this PC.";
+    }
+
+    private void RenderSpatial(ServiceSnapshot snapshot, bool controlsReady)
+    {
+        SpatialFixedRadio.IsEnabled = snapshot.SpatialEngineInstalled;
+        SpatialTrackedRadio.IsEnabled = snapshot.SpatialEngineInstalled;
+        if (!snapshot.SpatialEngineInstalled)
+        {
+            SpatialStatusText.Text = "The system-wide engine is not installed. Enable it in SSAP3 Setup (opt-in).";
+            MotionBadge.Text = "OFF";
+        }
+        else
+        {
+            SpatialStatusText.Text = snapshot.SpatialMode switch
+            {
+                SpatialEngineMode.Off => "Off: audio is passed through unchanged.",
+                SpatialEngineMode.Fixed => "Virtual speakers in front of you.",
+                _ when !controlsReady => "Head tracking needs the AAP driver: rendering a fixed soundstage.",
+                _ => snapshot.Status.Kind switch
+                {
+                    DeviceStatusKind.MotionStreaming => "Speakers stay anchored to your monitor.",
+                    DeviceStatusKind.MotionStalled => "Motion stalled: holding the stage, then easing to centre.",
+                    DeviceStatusKind.MotionUnsupported => "No motion data from the AirPods: fixed soundstage.",
+                    _ => "Starting head tracking…",
+                },
+            };
+            MotionBadge.Text = snapshot.SpatialMode switch
+            {
+                SpatialEngineMode.Off => "OFF",
+                SpatialEngineMode.Fixed => "FIXED",
+                _ => snapshot.Motion == MotionStreamStatus.Streaming ? "LIVE" : "WAIT",
+            };
+        }
+
+        var pose = snapshot.Pose;
+        var tracking = snapshot.SpatialMode == SpatialEngineMode.Tracked && pose.Calibrated && snapshot.Motion != MotionStreamStatus.Inactive;
+        PoseText.Text = tracking
+            ? $"Yaw {pose.YawDegrees,6:+0.0;-0.0}°   Pitch {pose.PitchDegrees,6:+0.0;-0.0}°"
+            : "Yaw —   Pitch —";
+        MotionDetailText.Text = snapshot.Motion switch
+        {
+            MotionStreamStatus.Streaming => $"{snapshot.MotionRateHz:0} Hz · {pose.State} · decoder {(snapshot.DecoderVerified ? "verified" : "unverified")}",
+            MotionStreamStatus.WaitingForFirstFrame => "Waiting for the first motion packet…",
+            MotionStreamStatus.Stalled => "Motion packets stopped. Recovering…",
+            MotionStreamStatus.Unsupported => "The AirPods did not stream motion.",
+            _ => "Head tracking off",
+        };
+        RecenterButton.IsEnabled = tracking;
+        DrawStage(snapshot, tracking ? pose.YawDegrees : 0f);
+    }
+
+    private void DrawStage(ServiceSnapshot snapshot, float yawDegrees)
+    {
+        const double centerX = 75;
+        const double centerY = 90;
+        const double radius = 62;
+        var stage = _settings.Soundstage;
+        foreach (var (dot, azimuth) in new[] { (LeftSpeakerDot, -stage.SpeakerAzimuthDegrees), (RightSpeakerDot, stage.SpeakerAzimuthDegrees) })
+        {
+            var radians = azimuth * Math.PI / 180;
+            Canvas.SetLeft(dot, centerX + (radius * Math.Sin(radians)) - (dot.Width / 2));
+            Canvas.SetTop(dot, centerY - (radius * Math.Cos(radians)) - (dot.Height / 2));
+            dot.Opacity = snapshot.SpatialMode == SpatialEngineMode.Off ? 0.3 : 1;
+        }
+
+        // Yaw is positive to the LEFT (QuaternionMath convention); screen +X is right.
+        var yaw = yawDegrees * Math.PI / 180;
+        NoseLine.X2 = centerX - (24 * Math.Sin(yaw));
+        NoseLine.Y2 = centerY - (24 * Math.Cos(yaw));
+    }
+
+    private void RenderConversation(ServiceSnapshot snapshot, bool controlsReady)
+    {
+        ConversationToggle.IsEnabled = controlsReady;
+        ConversationStatusText.Text = !controlsReady
+            ? "Needs AirPods mode control (AAP driver)."
+            : snapshot.ConversationPhase switch
+            {
+                ConversationPhase.Disabled => "Off. When on, SSAP3 switches to Transparency while you talk.",
+                ConversationPhase.Idle => "Listening for your voice (AirPods speech detection).",
+                ConversationPhase.Detecting => "Speech detected…",
+                ConversationPhase.InConversation => "In conversation: Transparency on.",
+                ConversationPhase.Cooldown => "Conversation ended: previous mode restored.",
+                ConversationPhase.SuspendedByUser => "Paused because you changed the mode manually.",
+                _ => string.Empty,
+            };
+    }
+
+    private async void NoiseModeRadio_OnChecked(object sender, RoutedEventArgs e)
+    {
+        if (_uiUpdating || sender is not RadioButton { Tag: string tag } || !Enum.TryParse<NoiseControlMode>(tag, out var mode))
+        {
+            return;
+        }
+
+        await RequestModeAsync(mode);
+    }
+
+    private async Task RequestModeAsync(NoiseControlMode mode)
+    {
+        _modeRequestInFlight = true;
+        SetNoiseControlsEnabled(false);
+        NoiseStatusText.Text = $"Requesting {Label(mode)}…";
+        try
+        {
+            var result = await _service.SetListeningModeAsync(mode);
+            _modeResultText = result.Outcome switch
+            {
+                CommandOutcome.Confirmed => $"{Label(mode)} · confirmed",
+                CommandOutcome.Rejected => $"Stayed in {Label(result.Reported ?? mode)}",
+                CommandOutcome.Unconfirmed => "Sent, not confirmed by AirPods",
+                _ => "Could not send",
+            };
+            StatusLog.Text = result.Message;
+            Ssap3AppLog.Write($"Listening mode {mode}: {result.Outcome}.");
+        }
+        finally
+        {
+            _modeRequestInFlight = false;
+            SelectNoiseMode(_service is null ? null : _snapshot?.ReportedMode);
+            NoiseStatusText.Text = _modeResultText ?? string.Empty;
+            SetNoiseControlsEnabled(true);
+            _ = ClearModeResultLaterAsync();
+        }
+    }
+
+    private async Task ClearModeResultLaterAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        _modeResultText = null;
+    }
+
+    private async void SpatialModeRadio_OnChecked(object sender, RoutedEventArgs e)
+    {
+        if (_uiUpdating || sender is not RadioButton { Tag: string tag })
+        {
+            return;
+        }
+
+        var mode = tag switch
+        {
+            "Fixed" => SpatialEngineMode.Fixed,
+            "Tracked" => SpatialEngineMode.Tracked,
+            _ => SpatialEngineMode.Off,
+        };
+        _service.SetSpatialMode(mode);
+        _settings.SpatialMode = mode;
+        _settings.Save();
+        if (mode != SpatialEngineMode.Off)
+        {
+            await DisableWindowsSonicIfEnabledAsync();
+        }
+    }
+
+    private async Task DisableWindowsSonicIfEnabledAsync()
+    {
+        try
+        {
+            // SSAP3 renders binaurally itself; Windows Sonic on top would double-process.
+            var status = await _windowsSpatial.GetStatusAsync();
+            if (status.Enabled)
+            {
+                _ = await _windowsSpatial.SetWindowsSonicAsync(false);
+                StatusLog.Text = "Windows Sonic turned off to avoid double processing.";
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or System.IO.IOException)
+        {
+            Ssap3AppLog.Write($"Windows Sonic check failed: {exception.Message}");
+        }
+    }
+
+    private void RecenterButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        _service.Recenter();
+        StatusLog.Text = "Recentering: keep facing the monitor for a moment.";
+    }
+
+    private void ConversationToggle_OnChanged(object sender, RoutedEventArgs e)
+    {
+        if (_uiUpdating)
+        {
+            return;
+        }
+
+        var enabled = ConversationToggle.IsChecked == true;
+        _service.SetConversationAwareness(enabled);
+        _settings.ConversationAwarenessEnabled = enabled;
+        _settings.Save();
+    }
+
+    private void ReconnectButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        _service.Reconnect();
+        if (!_scanner.IsRunning)
+        {
+            StartScanner();
+        }
+
+        StatusLog.Text = "Reconnecting…";
+    }
 
     private async void ReportButton_OnClick(object sender, RoutedEventArgs e)
     {
-        var reportButton = sender as System.Windows.Controls.Button;
-        if (reportButton is not null)
+        if (sender is Button button)
         {
-            reportButton.IsEnabled = false;
+            button.IsEnabled = false;
         }
 
-        StatusLog.Text = "Collecting diagnostics…";
+        StatusLog.Text = "Collecting redacted diagnostics…";
         try
         {
             var result = await Ssap3DiagnosticCollector.CollectAsync();
-            StatusLog.Text = result.Complete
-                ? "Diagnostic ZIP created"
-                : "Diagnostic ZIP created with warnings";
-            Ssap3AppLog.Write($"Diagnostic bundle created: {result.ZipPath}");
+            StatusLog.Text = result.Complete ? "Diagnostic ZIP created (redacted)" : "Diagnostic ZIP created with warnings";
             _ = Process.Start(new ProcessStartInfo
             {
                 FileName = "explorer.exe",
@@ -224,711 +491,96 @@ public partial class MainWindow : Window
                 UseShellExecute = true,
             });
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is System.IO.IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException)
         {
             StatusLog.Text = $"Report failed: {Shorten(exception.Message, 45)}";
             Ssap3AppLog.Write($"Diagnostic collection failed: {exception}");
         }
         finally
         {
-            if (reportButton is not null)
+            if (sender is Button finished)
             {
-                reportButton.IsEnabled = true;
+                finished.IsEnabled = true;
             }
         }
     }
 
-    private async void NoiseModeRadio_OnChecked(object sender, RoutedEventArgs e)
+    private void SettingsButton_OnClick(object sender, RoutedEventArgs e) => OpenSettings();
+
+    internal void OpenSettings()
     {
-        if (!_uiReady ||
-            sender is not RadioButton { Tag: string tag } ||
-            !Enum.TryParse<NoiseControlMode>(tag, out var mode))
+        if (_settingsWindow is null)
         {
-            return;
+            _settingsWindow = new SettingsWindow(this);
+            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+            _settingsWindow.Show();
+        }
+        else
+        {
+            _settingsWindow.Activate();
         }
 
-        await SetNoiseModeAsync(mode);
-    }
-
-    private async Task SetNoiseModeAsync(NoiseControlMode mode)
-    {
-        SetNoiseControlsEnabled(false);
-        NoiseStatusText.Text = "Sending…";
-        NoiseStatusText.Foreground = (Brush)FindResource("MutedTextBrush");
-        try
+        if (_snapshot is not null)
         {
-            await SendAacpPacketAsync(AacpPacketFactory.CreateNoiseControl(mode));
-            SelectNoiseMode(mode);
-            _settings.NoiseMode = mode.ToString();
-            _settings.Save();
-            NoiseStatusText.Text = GetNoiseModeLabel(mode);
-            NoiseStatusText.Foreground = (Brush)FindResource("SuccessBrush");
-            StatusLog.Text = $"AirPods mode changed · {DateTime.Now:T}";
-            _trayIcon.Text = $"SSAP3 · {GetNoiseModeLabel(mode)}";
-        }
-        catch (Exception exception)
-        {
-            ResetAacpConnection();
-            NoiseStatusText.Text = "Not connected";
-            NoiseStatusText.Foreground = Brushes.Orange;
-            StatusLog.Text = Shorten(exception.Message, 62);
-        }
-        finally
-        {
-            SetNoiseControlsEnabled(true);
+            _settingsWindow.Render(_snapshot);
         }
     }
 
-    private async void SpatialModeRadio_OnChecked(object sender, RoutedEventArgs e)
+    internal void ApplySettings()
     {
-        if (!_uiReady ||
-            sender is not RadioButton { Tag: string tag } ||
-            !Enum.TryParse<Ssap3SpatialMode>(tag, out var mode))
-        {
-            return;
-        }
-
-        await SetSpatialModeAsync(mode);
+        _settings.Save();
+        _service.SetSoundstage(_settings.Soundstage);
+        _service.SetCalibration(_settings.InvertYaw, _settings.InvertPitch, _settings.DriftCorrection);
+        _service.SetHeadTrackingEnabled(_settings.HeadTrackingEnabled);
     }
 
-    private async Task SetSpatialModeAsync(Ssap3SpatialMode mode)
-    {
-        SetSpatialControlsEnabled(false);
-        SpatialStatusText.Text = "Configuring the audio pipeline…";
-        try
-        {
-            if (mode == Ssap3SpatialMode.Off)
-            {
-                await StopMotionTrackingAsync();
-                _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Off);
-                await DisableWindowsSonicIfEnabledAsync();
-                ApplySpatialResult(
-                    CreateSsap3SpatialStatus(enabled: false),
-                    Ssap3SpatialMode.Off);
-                return;
-            }
+    private void HideButton_OnClick(object sender, RoutedEventArgs e) => HideToTray();
 
-            if (!HeadTrackingAudioStateWriter.IsEngineInstalled ||
-                !_headTrackingAudioState.IsAvailable)
-            {
-                _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Off);
-                ApplySpatialResult(
-                    new SpatialAudioStatus(
-                        Available: true,
-                        Enabled: false,
-                        EndpointId: string.Empty,
-                        EndpointName: "AirPods Stereo",
-                        Message: _headTrackingAudioState.LastError is null
-                            ? "Spatial engine is not installed. Run SSAP3 Setup again."
-                            : $"Spatial engine unavailable: {_headTrackingAudioState.LastError}"),
-                    Ssap3SpatialMode.Off);
-                return;
-            }
-
-            // SSAP3 performs its own binaural rendering. Keeping Windows
-            // Sonic enabled here would process the signal twice.
-            await DisableWindowsSonicIfEnabledAsync();
-            if (mode == Ssap3SpatialMode.Fixed)
-            {
-                await StopMotionTrackingAsync();
-                _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Fixed);
-                ApplySpatialResult(
-                    CreateSsap3SpatialStatus(enabled: true),
-                    Ssap3SpatialMode.Fixed);
-                return;
-            }
-
-            _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Tracked);
-            ApplySpatialResult(
-                CreateSsap3SpatialStatus(enabled: true),
-                Ssap3SpatialMode.Tracked);
-            await StartMotionTrackingAsync();
-        }
-        catch (Exception exception)
-        {
-            SpatialStatusText.Text = Shorten(exception.Message, 76);
-            SpatialStatusText.Foreground = Brushes.Orange;
-            StatusLog.Text = "Spatial Audio error";
-        }
-        finally
-        {
-            SetSpatialControlsEnabled(true);
-        }
-    }
-
-    private async Task RefreshSpatialStatusAsync()
-    {
-        await DisableWindowsSonicIfEnabledAsync();
-        if (HeadTrackingAudioStateWriter.IsEngineInstalled &&
-            _headTrackingAudioState.IsAvailable &&
-            Enum.TryParse<Ssap3SpatialMode>(
-                _settings.SpatialMode,
-                ignoreCase: true,
-                out var savedMode))
-        {
-            if (savedMode == Ssap3SpatialMode.Tracked)
-            {
-                _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Tracked);
-                ApplySpatialResult(
-                    CreateSsap3SpatialStatus(enabled: true),
-                    Ssap3SpatialMode.Tracked,
-                    save: false);
-                await StartMotionTrackingAsync();
-                return;
-            }
-
-            if (savedMode == Ssap3SpatialMode.Fixed)
-            {
-                _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Fixed);
-                ApplySpatialResult(
-                    CreateSsap3SpatialStatus(enabled: true),
-                    Ssap3SpatialMode.Fixed,
-                    save: false);
-                return;
-            }
-        }
-
-        _headTrackingAudioState.SetMode(Ssap3SpatialEngineMode.Off);
-        var status = CreateSsap3SpatialStatus(enabled: false);
-        ApplySpatialResult(status, Ssap3SpatialMode.Off, save: false);
-    }
-
-    private async Task DisableWindowsSonicIfEnabledAsync()
-    {
-        var status = await _spatialAudio.GetStatusAsync();
-        if (status.Enabled)
-        {
-            _ = await _spatialAudio.SetWindowsSonicAsync(false);
-        }
-    }
-
-    private static SpatialAudioStatus CreateSsap3SpatialStatus(bool enabled) =>
-        new(
-            Available: true,
-            Enabled: enabled,
-            EndpointId: string.Empty,
-            EndpointName: "AirPods Stereo",
-            Message: enabled
-                ? "SSAP3 binaural engine active"
-                : "Spatial audio is off");
-
-    private void ApplySpatialResult(
-        SpatialAudioStatus status,
-        Ssap3SpatialMode mode,
-        bool save = true)
-    {
-        _uiReady = false;
-        SpatialOffRadio.IsChecked = mode == Ssap3SpatialMode.Off;
-        SpatialFixedRadio.IsChecked = mode == Ssap3SpatialMode.Fixed;
-        SpatialTrackedRadio.IsChecked = mode == Ssap3SpatialMode.Tracked;
-        _uiReady = true;
-
-        SpatialStatusText.Text = mode switch
-        {
-            Ssap3SpatialMode.Fixed when status.Enabled =>
-                "SSAP3 HRTF · fixed ssap3",
-            Ssap3SpatialMode.Tracked when status.Enabled =>
-                "SSAP3 HRTF · starting head tracking",
-            _ => status.Message,
-        };
-        SpatialStatusText.Foreground = status.Enabled
-            ? (Brush)FindResource("SuccessBrush")
-            : (Brush)FindResource("MutedTextBrush");
-        MotionBadge.Text = mode == Ssap3SpatialMode.Tracked ? "SYNC" : "HRTF";
-
-        if (save)
-        {
-            _settings.SpatialMode = mode.ToString();
-            _settings.Save();
-        }
-    }
-
-    private async Task StartMotionTrackingAsync()
-    {
-        await StopMotionTrackingAsync();
-        _headTrackingParser.Reset();
-        _smoothedYaw = 0;
-        _smoothedPitch = 0;
-        _trackingCenterYaw = 0;
-        _trackingCenterPitch = 0;
-        _trackingCenterSamples = 0;
-        await SendAacpPacketAsync(AacpPacketFactory.CreateOwnsConnection(true));
-        await Task.Delay(350);
-        await SendAacpPacketAsync(
-            AacpPacketFactory.CreateAlternateStartHeadTracking());
-
-        _motionCancellation = new CancellationTokenSource();
-        _ = ReadMotionLoopAsync(_motionCancellation.Token);
-    }
-
-    private async Task StopMotionTrackingAsync()
-    {
-        var cancellation = _motionCancellation;
-        _motionCancellation = null;
-        if (cancellation is null)
-        {
-            return;
-        }
-
-        cancellation.Cancel();
-        cancellation.Dispose();
-        try
-        {
-            await SendAacpPacketAsync(
-                AacpPacketFactory.CreateAlternateStopHeadTracking());
-        }
-        catch
-        {
-            // Disconnecting while stopping the optional sensor stream is harmless.
-        }
-
-        MotionBadge.Text = "HRTF";
-    }
-
-    private async Task ReadMotionLoopAsync(CancellationToken cancellationToken)
-    {
-        _motionReaderRunning = true;
-        var started = DateTime.UtcNow;
-        var triedFallbackPacket = false;
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                byte[] packet;
-                try
-                {
-                    await _driverGate.WaitAsync(cancellationToken);
-                    try
-                    {
-                        packet = _driverClient?.Receive() ?? [];
-                    }
-                    finally
-                    {
-                        _driverGate.Release();
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-                catch (Exception exception)
-                {
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        MotionBadge.Text = "IMU ×";
-                        SpatialStatusText.Text =
-                            $"Fixed HRTF active · sensor: {Shorten(exception.Message, 40)}";
-                    });
-                    return;
-                }
-
-                if (_headTrackingParser.TryParse(packet, out var frame))
-                {
-                    const int centerSampleCount = 12;
-                    if (_trackingCenterSamples < centerSampleCount)
-                    {
-                        _trackingCenterSamples++;
-                        _trackingCenterYaw += WrapDegrees(
-                            frame.Yaw - _trackingCenterYaw) /
-                            _trackingCenterSamples;
-                        _trackingCenterPitch +=
-                            (frame.Pitch - _trackingCenterPitch) /
-                            _trackingCenterSamples;
-                        _smoothedYaw = 0;
-                        _smoothedPitch = 0;
-                    }
-                    else
-                    {
-                        var centeredYaw = WrapDegrees(
-                            frame.Yaw - _trackingCenterYaw);
-                        var centeredPitch =
-                            frame.Pitch - _trackingCenterPitch;
-                        var yawDelta = WrapDegrees(
-                            centeredYaw - _smoothedYaw);
-                        var pitchDelta = centeredPitch - _smoothedPitch;
-                        var yawSmoothing = Math.Clamp(
-                            0.12f + Math.Abs(yawDelta) * 0.018f,
-                            0.12f,
-                            0.42f);
-                        var pitchSmoothing = Math.Clamp(
-                            0.11f + Math.Abs(pitchDelta) * 0.016f,
-                            0.11f,
-                            0.34f);
-                        _smoothedYaw += yawDelta * yawSmoothing;
-                        _smoothedPitch += pitchDelta * pitchSmoothing;
-                    }
-                    _headTrackingAudioState.UpdateMotion(
-                        _smoothedYaw,
-                        _smoothedPitch);
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        MotionBadge.Text = "LIVE";
-                        SpatialStatusText.Text = "Head tracking active";
-                        SpatialStatusText.Foreground =
-                            (Brush)FindResource("SuccessBrush");
-                    });
-                }
-                else if (_batteryPacketParser.TryParse(packet, out var battery) &&
-                         battery is not null)
-                {
-                    await Dispatcher.InvokeAsync(() => ApplyBatteryUpdate(battery));
-                }
-                else if (!triedFallbackPacket &&
-                         DateTime.UtcNow - started > TimeSpan.FromSeconds(2))
-                {
-                    triedFallbackPacket = true;
-                    try
-                    {
-                        await SendAacpPacketAsync(
-                            AacpPacketFactory.CreateStartHeadTracking());
-                    }
-                    catch
-                    {
-                        // The primary packet is only a compatibility fallback.
-                    }
-                }
-                else if (DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
-                {
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        MotionBadge.Text = "HRTF";
-                        SpatialStatusText.Text =
-                            "Fixed HRTF active · waiting for AirPods motion";
-                        SpatialStatusText.Foreground = Brushes.Orange;
-                    });
-                }
-
-                await Task.Delay(18, cancellationToken);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Mode changes and shutdown cancel the optional sensor stream.
-        }
-        finally
-        {
-            _motionReaderRunning = false;
-        }
-    }
-
-    private async Task SendAacpPacketAsync(byte[] packet)
-    {
-        if (string.IsNullOrWhiteSpace(_airPodsAddress))
-        {
-            LoadRememberedAirPods();
-        }
-
-        var address = _airPodsAddress ??
-            throw new InvalidOperationException(
-                "AirPods were not found in remembered Bluetooth devices.");
-
-        await _driverGate.WaitAsync();
-        try
-        {
-            await EnsureAacpConnectionLockedAsync(address, allowRepair: true);
-            var client = _driverClient ??
-                throw new InvalidOperationException(
-                    "The SSAP3 control driver did not become available.");
-            client.Send(packet);
-        }
-        finally
-        {
-            _driverGate.Release();
-        }
-    }
-
-    private async Task EnsureAacpConnectionLockedAsync(
-        string address,
-        bool allowRepair)
-    {
-        if (_driverClient is null)
-        {
-            var connection = Ssap3DriverAacpClient.TryConnect(address);
-            var firstError = connection.Message;
-            if (connection.Connected && connection.Client is not null)
-            {
-                _driverClient = connection.Client;
-            }
-            else
-            {
-                connection.Dispose();
-                if (!allowRepair)
-                {
-                    throw new IOException(firstError);
-                }
-
-                bool testSigningActive;
-                try
-                {
-                    testSigningActive = WindowsCodeIntegrity.IsTestSigningActive;
-                }
-                catch (Exception exception)
-                {
-                    Ssap3AppLog.Write(
-                        $"Code Integrity query failed before AAP repair: {exception.Message}");
-                    testSigningActive = true;
-                }
-
-                if (!testSigningActive)
-                {
-                    throw new IOException(
-                        "SSAP3 driver is blocked because Windows Test Mode is off. " +
-                        "Run SSAP3 Setup repair and restart Windows.");
-                }
-
-                var repair = await Task.Run(() =>
-                    WindowsAirPodsServiceManager.EnsureControlProfilesEnabled(
-                        forceRebind: true));
-                Ssap3AppLog.Write(
-                    $"AAP repair: found={repair.AirPodsFound}; " +
-                    $"connected={repair.Connected}; changed={repair.Changed}; " +
-                    $"enabled={repair.AnyProfileEnabled}; {repair.Message}");
-                if (!string.IsNullOrWhiteSpace(repair.Address))
-                {
-                    address = repair.Address;
-                    _airPodsAddress = repair.Address;
-                    DeviceAddress.Text = repair.Address;
-                }
-
-                if (!repair.AnyProfileEnabled)
-                {
-                    throw new IOException(repair.Message);
-                }
-
-                for (var attempt = 0; attempt < 12; attempt++)
-                {
-                    await Task.Delay(attempt == 0 ? 250 : 400);
-                    connection = Ssap3DriverAacpClient.TryConnect(address);
-                    if (connection.Connected && connection.Client is not null)
-                    {
-                        _driverClient = connection.Client;
-                        break;
-                    }
-
-                    firstError = connection.Message;
-                    connection.Dispose();
-                }
-
-                if (_driverClient is null)
-                {
-                    throw new IOException(
-                        $"{repair.Message} Driver interface did not return: {firstError}");
-                }
-            }
-
-            _aacpInitialized = false;
-        }
-
-        if (!_aacpInitialized)
-        {
-            _driverClient.Send(AacpPacketFactory.CreateHandshake());
-            _driverClient.Send(AacpPacketFactory.CreateFeatureFlags());
-            _driverClient.Send(AacpPacketFactory.CreateNotificationRequest());
-            _aacpInitialized = true;
-            Ssap3AppLog.Write("AACP session initialized.");
-        }
-    }
-
-    private async Task RepairControlPathAsync(bool force)
-    {
-        if (_repairInProgress ||
-            (!force &&
-             DateTime.UtcNow - _lastControlRepairAttempt < TimeSpan.FromSeconds(12)))
-        {
-            return;
-        }
-
-        _repairInProgress = true;
-        _lastControlRepairAttempt = DateTime.UtcNow;
-        RepairButton.IsEnabled = false;
-        try
-        {
-            LoadRememberedAirPods();
-            if (string.IsNullOrWhiteSpace(_airPodsAddress))
-            {
-                StatusLog.Text = "Pair AirPods in Windows first";
-                return;
-            }
-
-            StatusLog.Text = force
-                ? "Repairing the AirPods control profile…"
-                : "Checking the AirPods control profile…";
-            await _driverGate.WaitAsync();
-            try
-            {
-                await EnsureAacpConnectionLockedAsync(
-                    _airPodsAddress,
-                    allowRepair: true);
-            }
-            finally
-            {
-                _driverGate.Release();
-            }
-
-            NoiseStatusText.Text = "AAP ready";
-            NoiseStatusText.Foreground = (Brush)FindResource("SuccessBrush");
-            StatusLog.Text = "AirPods control profile ready";
-            Ssap3AppLog.Write("Control path health check passed.");
-            if (SpatialTrackedRadio.IsChecked == true && !_motionReaderRunning)
-            {
-                await StartMotionTrackingAsync();
-            }
-        }
-        catch (Exception exception)
-        {
-            ResetAacpConnection();
-            NoiseStatusText.Text = "Not connected";
-            NoiseStatusText.Foreground = Brushes.Orange;
-            StatusLog.Text = Shorten(exception.Message, 66);
-            Ssap3AppLog.Write($"Control path repair failed: {exception}");
-        }
-        finally
-        {
-            RepairButton.IsEnabled = true;
-            _repairInProgress = false;
-        }
-    }
-
-    private void ResetAacpConnection()
-    {
-        _driverClient?.Dispose();
-        _driverClient = null;
-        _aacpInitialized = false;
-    }
+    private void ExitButton_OnClick(object sender, RoutedEventArgs e) =>
+        ((App)System.Windows.Application.Current).ExitApplication();
 
     private void StartScanner()
     {
-        try
-        {
-            _scanner.Start();
-            if (!_airPodsClassicConnected)
-            {
-                ConnectionBadge.Text = "Scanning AirPods over BLE…";
-                ConnectionDot.Fill = Brushes.Gold;
-            }
-        }
-        catch (Exception exception)
-        {
-            ConnectionBadge.Text = "Bluetooth unavailable";
-            ConnectionDot.Fill = Brushes.OrangeRed;
-            StatusLog.Text = Shorten(exception.Message, 62);
-            Ssap3AppLog.Write($"BLE scanner failed to start: {exception}");
-        }
-    }
-
-    private void LoadRememberedAirPods()
-    {
-        try
-        {
-            var remembered = WindowsRememberedAirPodsFinder.FindBest();
-            if (remembered is null)
-            {
-                _airPodsClassicConnected = false;
-                return;
-            }
-
-            var addressChanged = !string.Equals(
-                    _airPodsAddress,
-                    remembered.Address,
-                    StringComparison.OrdinalIgnoreCase);
-            var connectionDropped = _airPodsClassicConnected && !remembered.Connected;
-            var connectionRestored = !_airPodsClassicConnected && remembered.Connected;
-            if (addressChanged || connectionDropped || connectionRestored)
-            {
-                ResetAacpConnection();
-            }
-
-            _airPodsAddress = remembered.Address;
-            _airPodsClassicConnected = remembered.Connected;
-            DeviceAddress.Text = remembered.Address;
-            ConnectionBadge.Text = remembered.Connected
-                ? "Connected · Stereo"
-                : "Remembered · open the case";
-            ConnectionDot.Fill = remembered.Connected
-                ? (Brush)FindResource("SuccessBrush")
-                : Brushes.Gold;
-        }
-        catch (Exception exception)
-        {
-            StatusLog.Text =
-                $"Bluetooth: {Shorten(exception.Message, 52)}";
-            Ssap3AppLog.Write($"Remembered AirPods lookup failed: {exception}");
-        }
-    }
-
-    private async void ConnectionTimer_OnTick(object? sender, EventArgs e)
-    {
-        if (_connectionRefreshInProgress)
+        if (_scanner.Start())
         {
             return;
         }
 
-        _connectionRefreshInProgress = true;
-        try
+        // Radio off or unavailable: retry quietly until Bluetooth comes back.
+        _scannerRetry ??= new DispatcherTimer(TimeSpan.FromSeconds(15), DispatcherPriority.Background, (_, _) =>
         {
-            LoadRememberedAirPods();
-            if (_airPodsClassicConnected && _driverClient is null)
+            if (_scanner.IsRunning || _scanner.Start())
             {
-                await RepairControlPathAsync(force: false);
+                _scannerRetry?.Stop();
             }
-            else if (!_airPodsClassicConnected &&
-                     DateTime.UtcNow - _lastAdvertisementReceived >
-                     TimeSpan.FromSeconds(8))
-            {
-                ConnectionBadge.Text = _airPodsAddress is null
-                    ? "Scanning AirPods over BLE…"
-                    : "Remembered · reconnecting";
-                ConnectionDot.Fill = Brushes.Gold;
-            }
-        }
-        finally
-        {
-            _connectionRefreshInProgress = false;
-        }
+        }, Dispatcher);
+        _scannerRetry.Start();
     }
 
-    private void Scanner_OnAdvertisementReceived(
-        object? sender,
-        AirPodsAdvertisementStatus status)
+    private DispatcherTimer? _scannerRetry;
+
+    private void Scanner_OnAdvertisementReceived(object? sender, AirPodsAdvertisementReceivedEventArgs e)
     {
-        Dispatcher.Invoke(() =>
+        Dispatcher.BeginInvoke(() =>
         {
-            _lastAdvertisementReceived = DateTime.UtcNow;
-            DeviceModel.Text = status.Model;
-            DeviceAddress.Text = _airPodsAddress ?? status.Address;
-            SetBattery(LeftBatteryText, status.LeftBattery, status.IsLeftCharging);
-            SetBattery(RightBatteryText, status.RightBattery, status.IsRightCharging);
-            UpdateCaseBattery(status.CaseBattery, status.IsCaseCharging);
-            ConnectionBadge.Text = _airPodsClassicConnected
-                ? "Connected · Stereo"
-                : "AirPods nearby · BLE";
-            ConnectionDot.Fill = _airPodsClassicConnected
-                ? (Brush)FindResource("SuccessBrush")
-                : Brushes.Gold;
-            StatusLog.Text =
-                $"{(status.IsLeftInEar ? "L in ear" : "L out")} · " +
-                $"{(status.IsRightInEar ? "R in ear" : "R out")} · " +
-                $"{DateTime.Now:T}";
+            if (_advertisementFilter.Evaluate(e.Status, e.Rssi) != AdvertisementVerdict.Accepted)
+            {
+                return;
+            }
+
+            _advertisement = e.Status;
+            _advertisementAt = DateTimeOffset.UtcNow;
+            if (_snapshot is not null)
+            {
+                RenderBattery(_snapshot);
+            }
         });
     }
 
-    private void ApplyBatteryUpdate(AirPodsBatteryUpdate update)
+    private void Scanner_OnStatusChanged(object? sender, string status)
     {
-        if (update.LeftLevel is not null)
-        {
-            SetBattery(
-                LeftBatteryText,
-                update.LeftLevel,
-                update.IsLeftCharging);
-        }
-        if (update.RightLevel is not null)
-        {
-            SetBattery(
-                RightBatteryText,
-                update.RightLevel,
-                update.IsRightCharging);
-        }
-        UpdateCaseBattery(update.CaseLevel, update.IsCaseCharging);
+        Ssap3AppLog.Write(status);
+        Dispatcher.BeginInvoke(() => StatusLog.Text = Shorten(status, 66));
     }
 
     private void UpdateCaseBattery(int? level, bool charging)
@@ -938,7 +590,6 @@ public partial class MainWindow : Window
             _settings.LastCaseBattery = level;
             _settings.LastCaseCharging = charging;
             _settings.LastCaseBatteryObservedAt = DateTimeOffset.UtcNow;
-            _settings.Save();
             SetBattery(CaseBatteryText, level, charging);
             CaseBatteryText.ToolTip = "Live case battery";
             return;
@@ -946,49 +597,33 @@ public partial class MainWindow : Window
 
         if (_settings.LastCaseBattery is not null &&
             _settings.LastCaseBatteryObservedAt is { } observedAt &&
-            DateTimeOffset.UtcNow - observedAt < TimeSpan.FromDays(7))
+            DateTimeOffset.UtcNow - observedAt < TimeSpan.FromDays(2))
         {
-            SetBattery(
-                CaseBatteryText,
-                _settings.LastCaseBattery,
-                _settings.LastCaseCharging);
-            CaseBatteryText.ToolTip =
-                $"Last seen {observedAt.LocalDateTime:g}. Open the case to refresh.";
+            CaseBatteryText.Text = $"{_settings.LastCaseBattery}%*";
+            CaseBatteryText.ToolTip = $"Last seen {observedAt.LocalDateTime:g}. Open the case to refresh.";
             return;
         }
 
-        CaseBatteryText.Text = "Open case";
-        CaseBatteryText.ToolTip =
-            "The case broadcasts its battery while it is open.";
+        CaseBatteryText.Text = "—";
+        CaseBatteryText.ToolTip = "The case reports its battery while it is open.";
     }
 
-    private void Scanner_OnStatusChanged(object? sender, string status)
+    private void SelectNoiseMode(NoiseControlMode? mode)
     {
-        Ssap3AppLog.Write(status);
-        Dispatcher.Invoke(() => StatusLog.Text = Shorten(status, 66));
-    }
-
-    private void ApplySavedNoiseMode()
-    {
-        if (!Enum.TryParse<NoiseControlMode>(
-                _settings.NoiseMode,
-                out var mode))
-        {
-            mode = NoiseControlMode.NoiseCancellation;
-        }
-
-        SelectNoiseMode(mode);
-        NoiseStatusText.Text = GetNoiseModeLabel(mode);
-    }
-
-    private void SelectNoiseMode(NoiseControlMode mode)
-    {
-        _uiReady = false;
+        var previous = _uiUpdating;
+        _uiUpdating = true;
         NoiseOffRadio.IsChecked = mode == NoiseControlMode.Off;
         NoiseAncRadio.IsChecked = mode == NoiseControlMode.NoiseCancellation;
         NoiseTransparencyRadio.IsChecked = mode == NoiseControlMode.Transparency;
         NoiseAdaptiveRadio.IsChecked = mode == NoiseControlMode.Adaptive;
-        _uiReady = true;
+        _uiUpdating = previous;
+    }
+
+    private void SelectSpatialMode(SpatialEngineMode mode)
+    {
+        SpatialOffRadio.IsChecked = mode == SpatialEngineMode.Off;
+        SpatialFixedRadio.IsChecked = mode == SpatialEngineMode.Fixed;
+        SpatialTrackedRadio.IsChecked = mode == SpatialEngineMode.Tracked;
     }
 
     private void SetNoiseControlsEnabled(bool enabled)
@@ -999,12 +634,20 @@ public partial class MainWindow : Window
         NoiseAdaptiveRadio.IsEnabled = enabled;
     }
 
-    private void SetSpatialControlsEnabled(bool enabled)
+    private void UpdateTrayText(ServiceSnapshot snapshot)
     {
-        SpatialOffRadio.IsEnabled = enabled;
-        SpatialFixedRadio.IsEnabled = enabled;
-        SpatialTrackedRadio.IsEnabled = enabled;
+        var mode = snapshot.ReportedMode is { } reported ? $" · {Label(reported)}" : string.Empty;
+        var text = $"SSAP3 · {snapshot.Status.Title}{mode}";
+        _trayIcon.Text = text.Length > 63 ? text[..63] : text;
     }
+
+    private Brush SeverityBrush(StatusSeverity severity) => severity switch
+    {
+        StatusSeverity.Good => (Brush)FindResource("SuccessBrush"),
+        StatusSeverity.Info => Brushes.Gold,
+        StatusSeverity.Warning => Brushes.Orange,
+        _ => Brushes.OrangeRed,
+    };
 
     private void HideToTray()
     {
@@ -1015,15 +658,9 @@ public partial class MainWindow : Window
 
         _isAnimatingOut = true;
         var generation = ++_animationGeneration;
-        var fade = new DoubleAnimation(
-            PopupRoot.Opacity,
-            0,
-            TimeSpan.FromMilliseconds(130))
+        var fade = new DoubleAnimation(PopupRoot.Opacity, 0, TimeSpan.FromMilliseconds(130))
         {
-            EasingFunction = new QuadraticEase
-            {
-                EasingMode = EasingMode.EaseIn,
-            },
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn },
         };
         fade.Completed += (_, _) =>
         {
@@ -1042,44 +679,11 @@ public partial class MainWindow : Window
     {
         _animationGeneration++;
         _isAnimatingOut = false;
-        PopupRoot.BeginAnimation(
-            OpacityProperty,
-            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(190)));
+        PopupRoot.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(190)));
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        PopupScale.BeginAnimation(
-            ScaleTransform.ScaleXProperty,
-            new DoubleAnimation(0.94, 1, TimeSpan.FromMilliseconds(240))
-            {
-                EasingFunction = ease,
-            });
-        PopupScale.BeginAnimation(
-            ScaleTransform.ScaleYProperty,
-            new DoubleAnimation(0.94, 1, TimeSpan.FromMilliseconds(240))
-            {
-                EasingFunction = ease,
-            });
-        PopupTranslate.BeginAnimation(
-            TranslateTransform.YProperty,
-            new DoubleAnimation(18, 0, TimeSpan.FromMilliseconds(240))
-            {
-                EasingFunction = ease,
-            });
-    }
-
-    private void AnimateRefreshButton()
-    {
-        RefreshButton.RenderTransformOrigin = new Point(0.5, 0.5);
-        var rotate = new RotateTransform();
-        RefreshButton.RenderTransform = rotate;
-        rotate.BeginAnimation(
-            RotateTransform.AngleProperty,
-            new DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(520))
-            {
-                EasingFunction = new CubicEase
-                {
-                    EasingMode = EasingMode.EaseInOut,
-                },
-            });
+        PopupScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.94, 1, TimeSpan.FromMilliseconds(240)) { EasingFunction = ease });
+        PopupScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.94, 1, TimeSpan.FromMilliseconds(240)) { EasingFunction = ease });
+        PopupTranslate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(18, 0, TimeSpan.FromMilliseconds(240)) { EasingFunction = ease });
     }
 
     private void PositionNearTray()
@@ -1088,24 +692,22 @@ public partial class MainWindow : Window
         var screen = WinForms.Screen.FromPoint(cursor);
         var dpi = VisualTreeHelper.GetDpi(this);
         Left = (screen.WorkingArea.Right / dpi.DpiScaleX) - Width - 8;
-        Top = (screen.WorkingArea.Bottom / dpi.DpiScaleY) - Height - 8;
+        Top = Math.Max(screen.WorkingArea.Top / dpi.DpiScaleY, (screen.WorkingArea.Bottom / dpi.DpiScaleY) - Height - 8);
     }
 
     private WinForms.NotifyIcon CreateTrayIcon()
     {
         var icon = new WinForms.NotifyIcon
         {
-            Icon = CreateSsap3Icon(),
-            Text = "SSAP3 · AirPods",
+            Icon = CreateIcon(),
+            Text = "SSAP3 Control Center",
             Visible = true,
         };
         icon.MouseDown += (_, args) =>
         {
             if (args.Button == WinForms.MouseButtons.Left)
             {
-                Dispatcher.BeginInvoke(
-                    DispatcherPriority.Send,
-                    () =>
+                Dispatcher.BeginInvoke(DispatcherPriority.Send, () =>
                 {
                     _ignoreDeactivationUntil = DateTime.UtcNow.AddSeconds(1);
                     _animationGeneration++;
@@ -1118,9 +720,7 @@ public partial class MainWindow : Window
         {
             if (args.Button == WinForms.MouseButtons.Left)
             {
-                Dispatcher.BeginInvoke(
-                    DispatcherPriority.Send,
-                    ToggleFromTray);
+                Dispatcher.BeginInvoke(DispatcherPriority.Send, ToggleFromTray);
             }
         };
 
@@ -1130,49 +730,30 @@ public partial class MainWindow : Window
             BackColor = Drawing.Color.FromArgb(32, 34, 44),
             ForeColor = Drawing.Color.White,
         };
-        menu.Items.Add(CreateTrayMenuItem(
-            "Open SSAP3",
-            (_, _) => Dispatcher.Invoke(ShowFromTray)));
+        menu.Items.Add(MenuItem("Open SSAP3", () => ShowFromTray()));
+        menu.Items.Add(MenuItem("Settings…", OpenSettings));
         menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add(CreateTrayMenuItem(
-            "ANC",
-            (_, _) => Dispatcher.Invoke(
-                async () => await SetNoiseModeAsync(
-                    NoiseControlMode.NoiseCancellation))));
-        menu.Items.Add(CreateTrayMenuItem(
-            "Transparency",
-            (_, _) => Dispatcher.Invoke(
-                async () => await SetNoiseModeAsync(
-                    NoiseControlMode.Transparency))));
-        menu.Items.Add(CreateTrayMenuItem(
-            "Adaptive",
-            (_, _) => Dispatcher.Invoke(
-                async () => await SetNoiseModeAsync(
-                    NoiseControlMode.Adaptive))));
+        menu.Items.Add(MenuItem("Noise Cancellation", () => _ = RequestModeAsync(NoiseControlMode.NoiseCancellation)));
+        menu.Items.Add(MenuItem("Transparency", () => _ = RequestModeAsync(NoiseControlMode.Transparency)));
+        menu.Items.Add(MenuItem("Adaptive", () => _ = RequestModeAsync(NoiseControlMode.Adaptive)));
         menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add(CreateTrayMenuItem(
-            "Exit",
-            (_, _) => Dispatcher.Invoke(
-                () => ((App)System.Windows.Application.Current).ExitApplication())));
+        menu.Items.Add(MenuItem("Recenter soundstage", () => _service.Recenter()));
+        menu.Items.Add(new WinForms.ToolStripSeparator());
+        menu.Items.Add(MenuItem("Exit", () => ((App)System.Windows.Application.Current).ExitApplication()));
         icon.ContextMenuStrip = menu;
         return icon;
     }
 
-    private static WinForms.ToolStripMenuItem CreateTrayMenuItem(
-        string text,
-        EventHandler handler)
+    private WinForms.ToolStripMenuItem MenuItem(string text, Action action)
     {
         var item = new WinForms.ToolStripMenuItem(text);
-        item.Click += handler;
+        item.Click += (_, _) => Dispatcher.BeginInvoke(action);
         return item;
     }
 
-    private static Drawing.Icon CreateSsap3Icon()
+    private static Drawing.Icon CreateIcon()
     {
-        var resource = System.Windows.Application.GetResourceStream(
-            new Uri(
-                "pack://application:,,,/Assets/SSAP3.ico",
-                UriKind.Absolute));
+        var resource = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/Assets/SSAP3.ico", UriKind.Absolute));
         if (resource is null)
         {
             return (Drawing.Icon)Drawing.SystemIcons.Application.Clone();
@@ -1183,40 +764,18 @@ public partial class MainWindow : Window
         return (Drawing.Icon)icon.Clone();
     }
 
-    private static void SetBattery(
-        TextBlock text,
-        int? level,
-        bool charging)
-    {
-        text.Text = level is null
-            ? "—"
-            : $"{level}%{(charging ? " ⚡" : string.Empty)}";
-    }
+    private static void SetBattery(TextBlock text, int? level, bool charging) =>
+        text.Text = level is null ? "—" : $"{level}%{(charging ? " ⚡" : string.Empty)}";
 
-    private static string GetNoiseModeLabel(NoiseControlMode mode) =>
-        mode switch
-        {
-            NoiseControlMode.Off => "Off",
-            NoiseControlMode.NoiseCancellation => "ANC",
-            NoiseControlMode.Transparency => "Transparency",
-            NoiseControlMode.Adaptive => "Adaptive",
-            _ => mode.ToString(),
-        };
-
-    private static float WrapDegrees(float value)
+    internal static string Label(NoiseControlMode mode) => mode switch
     {
-        while (value > 180)
-        {
-            value -= 360;
-        }
-        while (value < -180)
-        {
-            value += 360;
-        }
-        return value;
-    }
+        NoiseControlMode.Off => "Off",
+        NoiseControlMode.NoiseCancellation => "ANC",
+        NoiseControlMode.Transparency => "Transparency",
+        NoiseControlMode.Adaptive => "Adaptive",
+        _ => mode.ToString(),
+    };
 
     private static string Shorten(string value, int length) =>
         value.Length <= length ? value : $"{value[..(length - 1)]}…";
-
 }

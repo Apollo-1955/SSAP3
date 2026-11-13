@@ -1,3 +1,4 @@
+using SSAP3.Core;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -8,9 +9,16 @@ namespace SSAP3.Diagnostics;
 
 public static class Ssap3DiagnosticCollector
 {
+    /// <summary>
+    /// Collects a local, read-only support bundle. Bluetooth addresses, device
+    /// names and user profile paths are redacted unless
+    /// <paramref name="includeIdentifiers"/> is true (SECURITY_AUDIT.md, S-13).
+    /// Nothing is uploaded.
+    /// </summary>
     public static async Task<DiagnosticBundleResult> CollectAsync(
         string? outputDirectory = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool includeIdentifiers = false)
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         outputDirectory ??= Path.Combine(
@@ -132,24 +140,29 @@ public static class Ssap3DiagnosticCollector
                 WriteIndented = true,
                 Converters = { new JsonStringEnumConverter() },
             };
+            var sensitiveNames = devices.Select(device => device.Name).ToArray();
+            string Clean(string value) =>
+                includeIdentifiers ? value : DiagnosticRedactor.Redact(value, sensitiveNames);
             await File.WriteAllTextAsync(
                 jsonPath,
-                JsonSerializer.Serialize(report, jsonOptions),
+                Clean(JsonSerializer.Serialize(report, jsonOptions)),
                 new UTF8Encoding(false),
                 cancellationToken);
             await File.WriteAllTextAsync(
                 textPath,
-                ReportFormatter.ToText(report),
+                Clean(ReportFormatter.ToText(report)),
                 new UTF8Encoding(true),
                 cancellationToken);
             File.Copy(textPath, standaloneTextPath, overwrite: true);
 
             CopyIfPresent(
                 Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                     "SSAP3",
+                    "setup",
                     "install.log"),
                 Path.Combine(workingDirectory, "install.log"),
+                Clean,
                 errors);
             CopyIfPresent(
                 Path.Combine(
@@ -157,6 +170,7 @@ public static class Ssap3DiagnosticCollector
                     "SSAP3",
                     "SSAP3.log"),
                 Path.Combine(workingDirectory, "SSAP3.log"),
+                Clean,
                 errors);
 
             var zipPath = Path.Combine(
@@ -226,44 +240,29 @@ public static class Ssap3DiagnosticCollector
             .StandardOutput ?? string.Empty;
         var bcdConfigured = bcdOutput
             .Split('\r', '\n', StringSplitOptions.RemoveEmptyEntries)
-            .Where(line => line.TrimStart().StartsWith(
-                "testsigning",
-                StringComparison.OrdinalIgnoreCase))
-            .Select(line => line.Split(
-                (char[]?)null,
-                StringSplitOptions.RemoveEmptyEntries).LastOrDefault())
-            .Any(value => value is not null && new[]
-            {
-                "yes", "on", "true", "да", "вкл", "вкл.", "включено",
-            }.Contains(value, StringComparer.OrdinalIgnoreCase));
-        if (windows.TestSigningActive && !bcdConfigured)
+            .Where(line => line.TrimStart().StartsWith("testsigning", StringComparison.OrdinalIgnoreCase))
+            .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).LastOrDefault())
+            .Any(value => value is not null && new[] { "yes", "on", "true" }.Contains(value, StringComparer.OrdinalIgnoreCase));
+        if (windows.TestSigningActive || bcdConfigured)
         {
             findings.Add(
-                "Test Mode is active now but disabled in BCD for the next boot. " +
-                "Run SSAP3 Setup repair before restarting Windows.");
+                "Windows Test Mode is enabled. SSAP3 never requires Test Mode; if it was enabled only for a " +
+                "previous SoundStage installation, uninstall that and run 'bcdedit /set testsigning off' as administrator.");
         }
 
-        if (combinedOutput.Contains(
-                "CM_PROB_UNSIGNED_DRIVER",
-                StringComparison.OrdinalIgnoreCase))
+        if (combinedOutput.Contains("CM_PROB_UNSIGNED_DRIVER", StringComparison.OrdinalIgnoreCase))
         {
             findings.Add(
-                "A present PnP device has problem code 52 (unsigned driver). " +
-                "For SSAP3 this normally means Test Mode was not active at boot.");
-        }
-        else if (!windows.TestSigningActive && !bcdConfigured)
-        {
-            findings.Add(
-                "Test Mode is disabled. The test-signed SSAP3 control driver cannot load; " +
-                "run SSAP3 Setup and complete its restart step.");
-        }
-        else if (!windows.TestSigningActive && bcdConfigured)
-        {
-            findings.Add(
-                "Test Mode is enabled in BCD but is not active in this boot. " +
-                "Restart Windows, then run SSAP3 Setup again.");
+                "A present device reports problem code 52 (unsigned driver). Production SSAP3 builds install the AAP " +
+                "driver only when it carries a Microsoft signature.");
         }
 
+        if (!WindowsDriverPresence.IsSsap3DriverPresent())
+        {
+            findings.Add(
+                "The SSAP3 AAP driver is not active, so listening modes and head tracking are unavailable " +
+                "(battery and the fixed soundstage still work). This is expected until a Microsoft-signed driver is released.");
+        }
         if (windows.CurrentBuild < 22000)
         {
             findings.Add(
@@ -289,6 +288,11 @@ public static class Ssap3DiagnosticCollector
         if (combinedOutput.Contains("PID&201b", StringComparison.OrdinalIgnoreCase))
         {
             findings.Add("AirPods 4 with ANC Bluetooth product id 201B detected.");
+        }
+
+        if (combinedOutput.Contains("PID&2027", StringComparison.OrdinalIgnoreCase))
+        {
+            findings.Add("AirPods Pro 3 Bluetooth product id 2027 detected.");
         }
 
         var enabledServices = devices.SelectMany(device =>
@@ -360,16 +364,17 @@ public static class Ssap3DiagnosticCollector
     private static void CopyIfPresent(
         string source,
         string destination,
+        Func<string, string> clean,
         ICollection<string> errors)
     {
         try
         {
-            if (File.Exists(source))
+            if (File.Exists(source) && new FileInfo(source).Length <= 8 * 1024 * 1024)
             {
-                File.Copy(source, destination, overwrite: true);
+                File.WriteAllText(destination, clean(File.ReadAllText(source)));
             }
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             errors.Add($"Could not include {Path.GetFileName(source)}: {exception.Message}");
         }

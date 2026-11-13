@@ -35,41 +35,55 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
 
     public byte[]? EncryptionKey { get; set; }
 
-    public event EventHandler<AirPodsAdvertisementStatus>? AdvertisementReceived;
+    public event EventHandler<AirPodsAdvertisementReceivedEventArgs>? AdvertisementReceived;
 
     public event EventHandler<string>? StatusChanged;
 
-    public void Start()
+    /// <summary>
+    /// Starts scanning. Returns false (and raises a status message) instead of
+    /// throwing when the radio is off or unavailable, so callers can retry later.
+    /// </summary>
+    public bool Start()
     {
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started)
             {
-                return;
+                return true;
             }
 
-            if (_watcher.Status is BluetoothLEAdvertisementWatcherStatus.Aborted or
-                BluetoothLEAdvertisementWatcherStatus.Stopping)
+            try
+            {
+                if (_watcher.Status is BluetoothLEAdvertisementWatcherStatus.Aborted or
+                    BluetoothLEAdvertisementWatcherStatus.Stopping)
+                {
+                    ReplaceWatcher(BluetoothLEScanningMode.Active, stopPrevious: false);
+                }
+
+                _watcher.Start();
+                if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
+                {
+                    ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
+                    _watcher.Start();
+                }
+            }
+            catch (System.Runtime.InteropServices.COMException exception)
             {
                 ReplaceWatcher(BluetoothLEScanningMode.Active, stopPrevious: false);
-            }
-
-            _watcher.Start();
-            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
-            {
-                ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
-                _watcher.Start();
+                RaiseStatus($"Bluetooth LE is unavailable (radio off?): 0x{exception.HResult:X8}");
+                return false;
             }
 
             if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
             {
-                throw new InvalidOperationException(
-                    "Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
+                RaiseStatus("Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
+                return false;
             }
         }
 
         RaiseStatus($"BLE {_watcher.ScanningMode.ToString().ToLowerInvariant()} scanning started.");
+        return true;
     }
 
     public void Stop()
@@ -86,28 +100,15 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
         }
     }
 
-    public Task RestartAsync()
+    public Task<bool> RestartAsync()
     {
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ReplaceWatcher(BluetoothLEScanningMode.Active, stopPrevious: true);
-            _watcher.Start();
-            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
-            {
-                ReplaceWatcher(BluetoothLEScanningMode.Passive, stopPrevious: false);
-                _watcher.Start();
-            }
-
-            if (_watcher.Status == BluetoothLEAdvertisementWatcherStatus.Aborted)
-            {
-                throw new InvalidOperationException(
-                    "Windows aborted BLE scanning. Check Bluetooth and privacy settings.");
-            }
         }
 
-        RaiseStatus($"BLE {_watcher.ScanningMode.ToString().ToLowerInvariant()} scanning restarted.");
-        return Task.CompletedTask;
+        return Task.FromResult(Start());
     }
 
     public void Dispose()
@@ -152,7 +153,9 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
                         out var status) &&
                     status is not null)
                 {
-                    AdvertisementReceived?.Invoke(this, status);
+                    AdvertisementReceived?.Invoke(
+                        this,
+                        new AirPodsAdvertisementReceivedEventArgs(status, args.RawSignalStrengthInDBm));
                 }
             }
             catch (Exception exception)
@@ -252,6 +255,12 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
 
     private static byte[] ReadBuffer(IBuffer buffer)
     {
+        // Manufacturer data comes from any nearby advertiser: bound it before copying.
+        if (buffer.Length > 255)
+        {
+            throw new InvalidDataException("Oversized manufacturer data section.");
+        }
+
         using var reader = DataReader.FromBuffer(buffer);
         var bytes = new byte[buffer.Length];
         reader.ReadBytes(bytes);
@@ -260,9 +269,23 @@ public sealed class WindowsBleAirPodsScanner : IDisposable
 
     private static string FormatAddress(ulong address)
     {
-        var hex = address.ToString("X12");
+        var hex = address.ToString("X12", System.Globalization.CultureInfo.InvariantCulture);
         return string.Join(
             ':',
             Enumerable.Range(0, 6).Select(index => hex.Substring(index * 2, 2)));
     }
+}
+
+public sealed class AirPodsAdvertisementReceivedEventArgs : EventArgs
+{
+    public AirPodsAdvertisementReceivedEventArgs(AirPodsAdvertisementStatus status, short rssi)
+    {
+        Status = status;
+        Rssi = rssi;
+    }
+
+    public AirPodsAdvertisementStatus Status { get; }
+
+    /// <summary>Received signal strength in dBm.</summary>
+    public short Rssi { get; }
 }

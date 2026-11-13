@@ -21,7 +21,19 @@ public sealed class AirPodsAdvertisementParser
             [0x1B20] = "AirPods 4 (ANC)",
             [0x0A20] = "AirPods Max",
             [0x1F20] = "AirPods Max (USB-C)",
+            // Inferred from the Bluetooth DI product ID 0x2027 observed on a
+            // paired AirPods Pro 3 (byte-swapped like the entries above).
+            // Not yet confirmed from a captured advertisement; see
+            // HARDWARE_COMPATIBILITY.md.
+            [0x2720] = "AirPods Pro 3",
         };
+
+    /// <summary>Advertisement model ID (byte-swapped Bluetooth product ID) for AirPods Pro 3. Inferred.</summary>
+    public const int AirPodsPro3ModelId = 0x2720;
+
+    /// <summary>Converts a Bluetooth Device ID product ID (e.g. 0x2027) to the advertisement model ID (0x2720).</summary>
+    public static int ModelIdFromProductId(int productId) =>
+        ((productId & 0xFF) << 8) | ((productId >> 8) & 0xFF);
 
     private static readonly IReadOnlyDictionary<int, string> ColorNames =
         new Dictionary<int, string>
@@ -145,7 +157,8 @@ public sealed class AirPodsAdvertisementParser
             caseCharging,
             ((data[8] >> 3) & 0x01) == 0,
             ColorNames.GetValueOrDefault(data[9], "Unknown"),
-            ConnectionStates.GetValueOrDefault(data[10], $"Unknown ({data[10]})"));
+            ConnectionStates.GetValueOrDefault(data[10], $"Unknown ({data[10]})"),
+            modelId);
     }
 
     private static AirPodsAdvertisementStatus ParseUnencrypted(
@@ -189,7 +202,8 @@ public sealed class AirPodsAdvertisementParser
             (flags & 0x04) != 0,
             ((data[8] >> 3) & 0x01) == 0,
             ColorNames.GetValueOrDefault(data[9], "Unknown"),
-            ConnectionStates.GetValueOrDefault(data[10], $"Unknown ({data[10]})"));
+            ConnectionStates.GetValueOrDefault(data[10], $"Unknown ({data[10]})"),
+            modelId);
     }
 
     private static (bool Charging, int Level) DecodeEncryptedBattery(byte value) =>

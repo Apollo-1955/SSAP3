@@ -217,6 +217,13 @@ public sealed class WindowsSpatialAudioController
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
+        // S-10/S-11: only the copy installed next to SSAP3.exe is used, and only
+        // when its SHA-256 matches the pinned, reviewed NirSoft binary.
+        if (!IsTrustedTool(_toolPath))
+        {
+            throw new InvalidOperationException("SoundVolumeView failed its integrity check and was not started.");
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = _toolPath,
@@ -235,6 +242,22 @@ public sealed class WindowsSpatialAudioController
         return process.ExitCode;
     }
 
+    /// <summary>SHA-256 of SoundVolumeView 2.53 x64 as reviewed for SSAP3 (THIRD_PARTY.md).</summary>
+    public const string PinnedSoundVolumeViewSha256 = "B5AF5BD60F7A29AF8CB4D8A566382B90F0FE07CAC97228D218CB913F3382D647";
+
+    public static bool IsTrustedTool(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+            return string.Equals(hash, PinnedSoundVolumeViewSha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
     private static bool TryGetString(
         JsonElement element,
         string name,
@@ -251,37 +274,8 @@ public sealed class WindowsSpatialAudioController
         return true;
     }
 
-    private static string ResolveToolPath()
-    {
-        var installed = Path.Combine(
-            AppContext.BaseDirectory,
-            "tools",
-            "SoundVolumeView",
-            "SoundVolumeView.exe");
-        if (File.Exists(installed))
-        {
-            return installed;
-        }
-
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            var development = Path.Combine(
-                current.FullName,
-                "third_party",
-                "SoundVolumeView",
-                "SoundVolumeView.exe");
-            if (File.Exists(development))
-            {
-                return development;
-            }
-
-            current = current.Parent;
-        }
-
-        return installed;
-    }
-
+    private static string ResolveToolPath() =>
+        Path.Combine(AppContext.BaseDirectory, "tools", "SoundVolumeView", "SoundVolumeView.exe");
     private sealed record AirPodsAudioEndpoint(string EndpointId, string Name);
 }
 

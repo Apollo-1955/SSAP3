@@ -8,39 +8,31 @@ internal static class Program
     private static async Task<int> Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
-        if (args.Any(argument => argument.Equals(
-                "--repair-control",
-                StringComparison.OrdinalIgnoreCase)))
+        if (args.Any(argument => argument.Equals("--repair-control", StringComparison.OrdinalIgnoreCase)))
         {
-            Console.WriteLine(
-                "SSAP3: refreshing the paired AirPods AAP/UARP control profiles...");
-            var repair = WindowsAirPodsServiceManager.EnsureControlProfilesEnabled(
-                forceRebind: true);
+            Console.WriteLine("SSAP3: refreshing the paired AirPods AAP/UARP services (Windows Bluetooth API)...");
+            var repair = WindowsAirPodsServiceManager.EnsureControlProfilesEnabled(forceRebind: true);
             Console.WriteLine(repair.Message);
-            Console.WriteLine(
-                $"AirPods={repair.Address}; connected={repair.Connected}; changed={repair.Changed}");
+            Console.WriteLine($"connected={repair.Connected}; changed={repair.Changed}");
             foreach (var service in repair.Services)
             {
                 Console.WriteLine(
-                    $"- {service.ServiceGuid:D}: previouslyEnabled={service.WasEnabled}; " +
-                    $"enabled={service.Enabled}; error={service.ErrorCode}");
+                    $"- {service.ServiceGuid:D}: previouslyEnabled={service.WasEnabled}; enabled={service.Enabled}; error={service.ErrorCode}");
             }
 
             return repair.AnyProfileEnabled ? 0 : 3;
         }
 
-        Console.WriteLine(
-            "SSAP3: collecting read-only Windows and AirPods diagnostics...");
+        var includeIdentifiers = args.Any(argument => argument.Equals("--include-identifiers", StringComparison.OrdinalIgnoreCase));
+        Console.WriteLine("SSAP3: collecting read-only, local diagnostics" +
+            (includeIdentifiers ? " (identifiers INCLUDED - do not post publicly)..." : " (identifiers redacted)..."));
 
         var outputDirectory = ResolveOutputDirectory(args);
-        var result = await Ssap3DiagnosticCollector.CollectAsync(outputDirectory);
+        var result = await Ssap3DiagnosticCollector.CollectAsync(outputDirectory, includeIdentifiers: includeIdentifiers);
         Console.WriteLine($"Diagnostic bundle: {result.ZipPath}");
-        if (result.Errors.Count > 0)
+        foreach (var error in result.Errors)
         {
-            foreach (var error in result.Errors)
-            {
-                Console.WriteLine($"Warning: {error}");
-            }
+            Console.WriteLine($"Warning: {error}");
         }
 
         return result.Complete ? 0 : 2;
