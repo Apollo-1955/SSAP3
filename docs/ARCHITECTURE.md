@@ -1,193 +1,116 @@
 # SSAP3 architecture
 
-SSAP3 is split into small boundaries so the experimental kernel transport,
-protocol parsing, Windows integration, and real-time audio code can be tested
-independently.
+```mermaid
+flowchart LR
+    subgraph User["Signed-in user (standard rights)"]
+        UI["SSAP3 Control Center (WPF tray + settings)"]
+        SVC["AirPodsService: SSAP3 Motion thread"]
+        BLE["BLE advertisement scanner"]
+    end
+    subgraph Kernel["Kernel (Microsoft-signed only)"]
+        DRV["ssap3aap.sys: AACP L2CAP transport"]
+    end
+    subgraph Audio["audiodg.exe (LOCAL SERVICE)"]
+        EQ["Equalizer APO host (opt-in)"]
+        DSP["SSAP3 Spatial Engine (VST2)"]
+    end
+    UI <--> SVC
+    BLE --> UI
+    SVC <-->|"IOCTL v2"| DRV
+    DRV <-->|"PSM 0x1001"| AirPods(("AirPods Pro 3"))
+    SVC -->|"v2 state record"| STATE["%ProgramData%\SSAP3\Runtime\head-pose.bin"]
+    STATE -->|"read-only map, validated"| DSP
+    EQ --> DSP --> OUT["AirPods A2DP stereo endpoint"]
+```
 
-## Component map
+## Components
 
 | Component | Responsibility |
 | --- | --- |
-| `SSAP3.App` | WPF tray panel, user settings, mode state, animations, lifecycle |
-| `SSAP3.Core` | AAP packets, BLE/AAP parsers, crypto helpers, profile policy |
-| `SSAP3.Platform.Windows` | BLE watcher, remembered-device discovery, AAP/UARP service repair, audio endpoint control, driver client |
-| `Ssap3Aap` | Apple AAP/UARP Bluetooth profile binding and bounded packet transport |
-| `SSAP3Spatializer` | Real-time stereo-to-binaural rendering |
-| `SSAP3.Diagnostics` | Windows/Bluetooth/audio reports and an explicit profile-repair command |
-| `SSAP3.TransportProbe` | Low-level AAP transport diagnostics |
-| `installer` | Two-stage install, endpoint-effect chaining, and reversible uninstall |
-
-## Control path
-
-1. The app locates a remembered AirPods Bluetooth address.
-2. The user-mode client enumerates the SSAP3 device interface
-   `{3E98D13A-B2A5-4C3D-AE1E-8DB4F3D8C1F0}`.
-3. It checks the version and capability flags through
-   `SSAP3_IOCTL_GET_BRIDGE_STATUS`.
-4. It opens an AAP session for the selected address.
-5. The KMDF driver submits Bluetooth Request Blocks through
-   `GUID_BTHDDI_PROFILE_DRIVER_INTERFACE`.
-6. AACP packets are sent and received through bounded 512-byte IOCTL buffers.
-
-If step 2 finds no interface, the app verifies the running Code Integrity/Test
-Mode state. With Test Mode active, it asks Windows to refresh the paired
-AirPods AAP and UARP services using `BluetoothSetServiceState`, then retries
-interface discovery. This addresses stacks that keep A2DP connected but lose
-the Apple control PDO after reconnect.
-
-The driver owns sessions per file object. Cleanup closes every session
-belonging to a terminated client, so a crashed UI does not intentionally leave
-an orphaned AAP channel.
-
-### Driver scope
-
-The INF binds to either of these Apple service PDOs:
-
-`BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}...`
-
-`BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}...`
-
-Known Apple product IDs are listed explicitly, followed by profile-level
-fallback IDs. The driver does not replace:
-
-- the Bluetooth USB adapter driver;
-- Microsoft Bluetooth enumerators;
-- A2DP/AVDTP audio;
-- Hands-Free/HFP;
-- AVRCP media controls;
-- unrelated vendor or Apple services.
-
-The UARP binding is a fallback parent for the same fixed AACP L2CAP PSM; the
-driver does not implement firmware updates. This narrow service-level binding
-is important for safe removal and adapter portability.
-
-## AAP and AACP
-
-`AacpPacketFactory` creates the handshake, feature, notification, noise-control,
-connection-ownership, conversation-awareness, and motion-stream packets.
-
-Noise control is encoded as AACP control identifier `0x0D`, with the supported
-mode value. Incoming notifications are parsed rather than interpreted in the
-kernel. Keeping protocol semantics in managed user mode makes malformed packet
-handling easier to test and reduces kernel complexity.
-
-Protocol layouts were adapted from the GPL LibrePods ecosystem; attribution is
-recorded in `THIRD_PARTY.md`.
-
-## Battery and status
-
-SSAP3 has two telemetry paths:
-
-1. Apple Bluetooth LE manufacturer advertisements provide model, connection,
-   charging, in-ear, and battery values.
-2. AACP component notifications provide byte-accurate left/right/case battery
-   updates while the control channel is open.
-
-Advertisements can be encrypted on newer firmware. The parser supports an
-identity resolving key and AES block decryption when keys are available; it
-falls back to unencrypted fields otherwise.
-
-The BLE layer intentionally consumes observations and does not modify Windows
-pairing records.
+| `SSAP3.Core` | Pure logic, no I/O: AACP framing and parsers, listening-mode acknowledgement, quaternion math, `HeadPoseEstimator`, `MotionStreamMonitor`, `ControlChannelSupervisor`, `DeviceStatus`, conversation switching and VAD, shared-state layout, redaction |
+| `SSAP3.Platform.Windows` | Windows I/O: driver client, BLE scanner, radio state, paired-device lookup, product-ID lookup, monotonic clock, high-resolution waiter, state writer, Windows Sonic control |
+| `SSAP3.App` | Tray panel, settings window, and `AirPodsService` (orchestration on a dedicated thread) |
+| `SSAP3.Diagnostics` | Local, redacted support bundles |
+| `driver/Ssap3Aap` | KMDF profile driver on the Apple AAP service PDO: five bounded IOCTLs, bounded waits, session caps, outbound allowlist, kernel receive timestamps |
+| `audio/SSAP3Spatializer` | Real-time binaural renderer |
+| `installer` | Manifest-driven install, rollback and uninstall; integrity verifier |
 
 ## Motion pipeline
 
-1. SSAP3 requests the AirPods motion stream over AAP.
-2. `HeadTrackingFrameParser` validates packet prefixes and extracts orientation
-   and acceleration fields.
-3. Initial frames establish a parser neutral reference.
-4. The app collects a second short center sample set representing the user's
-   current straight-ahead position.
-5. Yaw uses wrap-safe angle deltas. Pitch uses a centered linear delta.
-6. Adaptive smoothing uses a lower coefficient for small jitter and a higher
-   coefficient for deliberate movement.
-7. The resulting pose is written to
-   `C:\ProgramData\SSAP3\head-tracking-state.bin`.
+1. The driver queues each inbound AACP packet with `KeQueryInterruptTime()`.
+2. The motion thread polls every 5 ms while tracking, using a
+   high-resolution waitable timer, and converts the kernel timestamp into
+   the same clock (`QueryInterruptTime`). It records driver-to-app latency
+   (median and p95) for diagnostics.
+3. `HeadTrackingFrameParser` strictly validates the frame. An
+   `IOrientationDecoder` turns the opaque fields into a unit quaternion. The
+   only decoder today is LibrePods' heuristic, **marked unverified**, with
+   per-axis invert options.
+4. `HeadPoseEstimator`:
+   - averages the first samples into the "forward" reference (recenter);
+   - smooths with a timestamp-aware One-Euro filter applied through SLERP;
+   - rejects physically implausible jumps (more than 1500°/s), accepting
+     them only if they persist;
+   - treats gaps longer than 300 ms as a re-acquisition, blended over
+     300 ms;
+   - holds the last pose after 250 ms without data, then eases back to
+     centre after 1.5 s;
+   - optionally corrects slow drift of small, steady yaw offsets.
+5. The service writes the v2 state record every 10 ms.
 
-The state file is memory-mapped with shared read/write access. Sequence numbers
-provide a small seqlock-style snapshot: odd means a write is in progress, even
-means readers can validate a stable frame. The audio process rejects tracked
-poses older than 1.2 seconds and falls back to centered rendering.
+### Coordinate system
 
-## Spatial audio pipeline
+Right-handed: +X is the listener's right, +Y is forward towards the monitor,
++Z is up. Quaternions rotate head-frame vectors into the calibrated world
+frame. Yaw is positive when turning **left** (about +Z), pitch is positive
+when looking **up** (about +X), and roll is positive when the **right** ear
+goes down (about +Y). Speaker azimuth is positive to the right. Both
+`QuaternionMath` (C#) and the DSP use exactly this convention, and unit tests
+check it.
 
-The installer attaches Equalizer APO to the AirPods A2DP Stereo render
-endpoint and loads `SSAP3Spatializer.dll` at post-mix stage.
+## Spatial engine
 
-Processing modes:
+- Reads the shared record with a sequence lock, and validates magic, version
+  and enums, finite unit quaternions, parameter ranges, and freshness
+  (`GetTickCount64`, 750 ms).
+- Rotates each world-fixed virtual speaker into the head frame and renders
+  interaural time and level differences, head shadowing (direction-dependent
+  low-pass), an elevation tilt, early reflections and a 4-line FDN room.
+- Parameters are interpolated per sample. Mode switches crossfade over
+  25 ms. Off is bit-exact. Non-finite input is sanitised and the output is
+  limited.
+- Allocation-free and lock-free in `Process()`. It flushes denormals and
+  restores the host's FP state afterwards.
 
-- `Off`: copies both float channels unchanged;
-- `Fixed`: renders two virtual front loudspeakers;
-- `Tracked`: applies the same renderer with head-relative source azimuths.
+HRIR convolution with SOFA-derived data is planned (ADR-5). SOFA files will be
+parsed in the unprivileged app, never inside `audiodg.exe`.
 
-The renderer is allocation-free in the audio callback and uses preallocated
-ring buffers. Its cues include:
+## Control path and acknowledgement
 
-- interaural time delay;
-- near/far-ear level difference;
-- far-ear low-pass shadowing;
-- fractional-delay interpolation;
-- dense asymmetric early reflections;
-- high- and low-limited room energy;
-- a four-line damped feedback delay network;
-- output headroom and hard safety limiting.
+`ListeningModeController` sends `04 00 04 00 09 00 0D <mode> 00 00 00`. It
+reports **Confirmed** only when the AirPods echo the same mode,
+**Rejected** when they report a different mode, and **Unconfirmed** on
+timeout. The UI shows the device-reported mode, never the requested one.
 
-The tuned scene presents a detached stereo system in a compact treated room.
-It is intentionally not a clone of Apple's personalized HRTF, which is not
-available to Windows applications.
+## Connection supervision
 
-Windows Sonic is disabled only when it is actually enabled and SSAP3 is
-selected, preventing double HRTF processing. ASIO/WASAPI exclusive clients may
-bypass the endpoint effect.
+`ControlChannelSupervisor` is a pure, single-flight state machine:
 
-## Endpoint-effect safety
+- States: Idle, Unavailable(reason), Connecting, Ready, WaitingToRetry,
+  Failed, Suspended.
+- Exponential backoff with jitter (0.5 s to 30 s) and a bounded budget of 8
+  attempts. After that it waits for a device, power or user event; there is
+  no infinite retry loop.
+- Sleep closes the session; resume restarts the episode.
+- A missing or incompatible driver is a permanent `Unavailable` state, not a
+  retry loop.
 
-Audio endpoint effects are registry-based and easy to damage if overwritten
-blindly. The spatial installer:
+## Trust boundaries
 
-1. discovers AirPods A2DP render endpoints;
-2. saves original SFX/MFX/EFX registrations under
-   `HKLM\SOFTWARE\SSAP3\SpatialAudio\OriginalEffects`;
-3. rejects a recursive Equalizer APO backup;
-4. configures Equalizer APO to chain the original effect;
-5. attaches the SSAP3 post-mix renderer;
-6. removes a cached disable-enhancements property while Windows Audio is
-   stopped;
-7. restarts Windows Audio.
+See `SECURITY_AUDIT.md` §1 and `SECURITY_REPORT.md`. In summary:
 
-The uninstaller restores the exact saved registrations.
-
-## Installer and recovery state
-
-`C:\ProgramData\SSAP3\install-state.json` records:
-
-- certificate thumbprint;
-- whether Test Mode was already active;
-- BCD backup path;
-- installed driver INF;
-- preparation and installation timestamps.
-
-This prevents uninstall from removing an unrelated certificate or disabling a
-Test Mode configuration the user already had.
-
-## Threading and process behavior
-
-- A named mutex enforces one SSAP3 UI instance.
-- A named event asks the existing instance to reveal itself.
-- Tray events are marshaled onto the WPF dispatcher.
-- A four-second timer reconciles the classic paired-device state and retries a
-  missing control path with throttling.
-- A cancellation token owns the motion read loop.
-- A semaphore serializes driver-channel operations.
-- The spatializer reads shared state without calling managed code or allocating
-  in the render callback.
-
-## Security boundaries
-
-The user-mode device interface is accessible to system, administrators, and
-interactive users. Every IOCTL validates structure size, session ownership,
-packet length, and maximum buffer size. The protocol does not expose arbitrary
-kernel pointers, physical memory, or generic Bluetooth control operations.
-
-This does not make a test-signed kernel driver production-safe. Microsoft
-production signing and wider hardware validation remain release requirements.
+- Bluetooth input is parsed only in user mode.
+- The driver exposes a bounded, allowlisted relay to interactive users only.
+- The DSP treats the state file as hostile.
+- Elevated setup code runs only from admin-only folders and reads only an
+  admin-only manifest.

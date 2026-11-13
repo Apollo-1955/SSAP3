@@ -279,6 +279,20 @@ static analysis, dependency, secret, driver or installer checks. Actions
 are not enabled on this fork (0 runs reported by the GitHub API). The
 workflow already uses `permissions: contents: read`, which is good.
 
+### S-22 — Medium — Device security set where Plug and Play ignores it
+
+Found during remediation. `soundstage-airpods4-anc.inf` placed
+`HKR,,Security`, `DeviceCharacteristics` and `DeviceType` in an AddReg
+referenced from the `[...Install.NT]` section. There, `HKR` is the driver's
+software key. PnP applies those values only from the `.HW` section (the
+device's hardware key), so the intended SDDL and `FILE_DEVICE_SECURE_OPEN`
+were probably never applied to the device stack. The effective access was
+then the BTHENUM PDO default plus the driver's
+`WdfDeviceInitAssignSDDLString` on the FDO.
+
+This is unverified at runtime. Fix: move the values into
+`[SSAP3_Profile_Install.NT.HW]`.
+
 ### S-21 — Informational — Unsigned release artifacts
 
 Neither the setup executable nor the app is Authenticode-signed, so users

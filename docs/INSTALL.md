@@ -1,202 +1,124 @@
-# Installing SSAP3
+# Installing and removing SSAP3
 
-This guide applies to the `v0.4.0` Windows public beta.
+> [!NOTE]
+> No SSAP3 release has been published yet. This guide describes the setup
+> that `installer/` builds on the `development/ssap3` branch.
 
-## Read this first
+## What Setup never does
 
-The current SSAP3 kernel driver is locally test-signed. Installation
-therefore requires:
+SSAP3 Setup **never**:
 
-- an administrator account;
-- x64 Windows 10 build 19041 or newer, or x64 Windows 11;
-- Windows Test Mode;
-- Secure Boot disabled;
-- one Windows restart between the two setup phases.
+- turns off Secure Boot, Memory Integrity, Microsoft Defender or driver
+  signature enforcement;
+- enables Test Mode or edits the boot configuration;
+- suspends BitLocker;
+- adds certificates to any Windows trust store;
+- installs a kernel driver that is not signed by Microsoft;
+- creates services, scheduled tasks, firewall rules or environment variables;
+- unpairs or re-pairs your AirPods.
 
-Disabling Secure Boot and enabling Test Mode reduce Windows platform security.
-This is a development signing path, not a Microsoft production-signed release:
+## What Setup installs
 
-- [Loading test-signed code](https://learn.microsoft.com/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
-- [Introduction to test signing](https://learn.microsoft.com/windows-hardware/drivers/install/introduction-to-test-signing)
+| Component | When | Where |
+| --- | --- | --- |
+| SSAP3 Control Center (`SSAP3.exe`, self-contained .NET 8) | Always | `%ProgramFiles%\SSAP3` |
+| Setup and uninstall engine, install manifest, install log | Always | `%ProgramFiles%\SSAP3\setup` (admin-only) |
+| Runtime state file for the spatial engine | Always | `%ProgramData%\SSAP3\Runtime` (protected ACL) |
+| Start Menu shortcut | Always | Start Menu |
+| Start at sign-in | Optional task (on by default) | `HKLM\…\Run\SSAP3` |
+| Desktop shortcut | Optional task (off by default) | Public desktop |
+| AAP driver (`ssap3aap.sys`) | Only if the package carries a **Microsoft** signature | Driver Store |
+| System-wide 3D soundstage engine | **Opt-in** task only | `%ProgramFiles%\EqualizerAPO` |
 
-If BitLocker or device encryption is enabled, make sure its recovery key is
-available before changing UEFI settings. SSAP3 suspends BitLocker
-protection for one restart before changing the Test Mode boot option, but it
-cannot change Secure Boot for you.
+Your settings and logs live in `%LocalAppData%\SSAP3`. Diagnostic reports go
+to `Documents\SSAP3\Reports`.
 
-## Download and verify
+### About the AAP driver
 
-1. Download `SSAP3-Setup.exe` from the latest GitHub release.
-2. Optionally download `SSAP3-Setup.exe.sha256` from the same release.
-3. Verify the executable in PowerShell:
+Listening modes, AACP battery, Conversation switching and head tracking need a
+small kernel driver. Windows loads a kernel driver on a normal PC only after
+Microsoft has signed it. Until an attestation-signed SSAP3 driver exists,
+Setup skips the driver and the app shows **Connected (audio only)**, with
+the reason. Battery from Bluetooth LE advertisements and the fixed
+soundstage still work.
 
-   ```powershell
-   Get-FileHash .\SSAP3-Setup.exe -Algorithm SHA256
-   ```
+### About the opt-in system-wide engine
 
-4. Compare the result with the release checksum.
+The 3D soundstage runs inside the Windows audio service through the
+Equalizer APO host. Equalizer APO requires
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio\DisableProtectedAudioDG = 1`.
+That turns off Windows' signature check for audio-processing components
+**for all devices**, and some protected-content playback may refuse to play
+while it is set.
 
-The setup executable is not yet signed by a publicly trusted commercial
-certificate, so Windows may show **Unknown publisher**. The bundled driver SYS
-and CAT are signed with the exact test certificate included in the package and
-are verified before the boot configuration is changed.
-
-## Disable Secure Boot
-
-The exact UEFI screen differs by PC vendor:
-
-1. Save your work and open Windows advanced startup.
-2. Choose **Troubleshoot → Advanced options → UEFI Firmware Settings**.
-3. Set **Secure Boot** to **Disabled**.
-4. Save the UEFI settings and return to Windows.
-
-Setup checks the Windows Secure Boot state and stops without changing it when
-Secure Boot is still enabled.
+Setup explains this on its own page and changes nothing unless you select the
+task. When you do, Setup records the previous value, every audio endpoint
+effect it touches, and the owner and permissions of any registry key it has
+to take over. Uninstall restores all of them exactly.
 
 ## Install
 
-### Phase 1: prepare Windows
+1. Pair your AirPods Pro 3 in **Settings > Bluetooth & devices**, and connect
+   them once so Windows creates the stereo endpoint.
+2. Run `SSAP3-Setup-<version>.exe` and approve the administrator prompt.
+3. Pick the optional tasks you want, then finish.
 
-1. Pair the AirPods in Windows Bluetooth settings.
-2. Connect them or open the case near the computer.
-3. Run `SSAP3-Setup.exe`.
-4. Approve the administrator prompt and accept the license.
+If any step fails, Setup reverts every change it recorded and reports the
+error. The log is in `%ProgramFiles%\SSAP3\setup\install.log`.
 
-The first run:
-
-- validates the Windows version, architecture, and package;
-- verifies the driver and catalog signatures;
-- imports the exact SSAP3 test certificate into Local Machine
-  `Root` and `TrustedPublisher`;
-- records reversible state under `C:\ProgramData\SSAP3`;
-- exports a BCD backup under `C:\ProgramData\SSAP3\backup`;
-- suspends BitLocker for one restart when protection is active;
-- enables the `TESTSIGNING` boot option.
-
-Choose **Restart now** on the final setup page. A **Test Mode** watermark after
-startup is expected.
-
-### Phase 2: install SSAP3
-
-1. Reconnect the AirPods after Windows starts.
-2. Run the same `SSAP3-Setup.exe` again.
-3. Approve the administrator prompt.
-
-The second run:
-
-- installs the KMDF Apple AAP/UARP control-profile driver;
-- verifies that the matching Bluetooth device is healthy;
-- installs SSAP3 into `C:\Program Files\SSAP3`;
-- installs the spatial engine only on detected AirPods A2DP Stereo endpoints;
-- backs up and chains existing endpoint effects;
-- creates Start menu and desktop shortcuts;
-- registers SSAP3 in Windows Apps & Features;
-- enables tray autostart.
-
-Pre-SSAP3 development builds are migrated automatically. Setup restores
-their audio-effect backup, removes their obsolete driver packages and
-certificates, preserves the BCD rollback state, and carries the user settings
-into SSAP3.
-
-## First use
-
-1. Select **AirPods Stereo** as Windows output, not
-   **Hands-Free AG Audio**.
-2. Click the SSAP3 tray icon.
-3. Test **Noise Control → ANC** and **Transparency**.
-4. Play stereo audio and compare **Spatial Audio → Off** with **Fixed**.
-5. Select **Head Tracked**, face forward during neutral calibration, and then
-   turn your head.
-
-For Discord and games, keep AirPods Stereo as output and use a separate
-microphone. Selecting the AirPods microphone activates the low-bandwidth
-Hands-Free Bluetooth profile.
+If the upstream **SoundStage for AirPods** is installed, Setup refuses to
+continue. Uninstall SoundStage first: its driver, root certificate and Test
+Mode change must be removed by its own uninstaller.
 
 ## Update or repair
 
-Run a newer `SSAP3-Setup.exe` again. Setup is idempotent:
-
-- it only performs the preparation phase when Test Mode is not active;
-- it verifies that Test Mode remains enabled in BCD for the next restart and
-  repairs the setting when the running kernel and BCD disagree;
-- it updates the app, driver, and spatial engine after Test Mode is active;
-- it retains the independent backup of the original endpoint effects.
-
-If the package is installed but the controls are not ready, open SSAP3 and
-click **Repair**. It refreshes only the paired Apple AAP/UARP services through
-the Windows Bluetooth API and waits for the driver interface. Reconnect the
-AirPods or open their case first. Rerun setup if the app reports that Test Mode
-is off or the driver package is missing.
-
-Click **Report** to create a support bundle under
-`Documents\SSAP3\Reports`. The ZIP includes the BCD/Test Mode state,
-Bluetooth devices and drivers, AAP/UARP presence, audio endpoints, Windows
-services, and SSAP3 install/app logs. It is never uploaded automatically;
-review Bluetooth addresses before attaching it to a public issue.
+Run a newer Setup. It reverts the previous installation's recorded system
+changes, then applies the new ones under a fresh manifest.
 
 ## Uninstall
 
-1. Open **Windows Settings → Apps → Apps & features**.
-2. Select **SSAP3** and click **Uninstall**.
-3. Approve the administrator prompt.
-4. Restart Windows when requested.
+Go to **Settings > Apps > Installed apps > SSAP3 for Windows > Uninstall**.
+The uninstaller asks whether to delete your settings, logs and reports as
+well:
+
+- **Standard uninstall (No):** removes SSAP3 and restores Windows, but keeps
+  your settings and reports.
+- **Complete uninstall (Yes):** also deletes `%LocalAppData%\SSAP3` and
+  `Documents\SSAP3` for your account.
 
 The uninstaller:
 
-- restores the original AirPods endpoint effects;
-- removes the SSAP3 driver package;
-- removes the exact test certificate;
-- removes the app, package payload, autostart entry, and shortcuts;
-- disables Test Mode only when SSAP3 originally enabled it.
+- stops only processes that run from `%ProgramFiles%\SSAP3`;
+- reverts every manifest step newest-first: audio effects, registry values,
+  key permissions, `DisableProtectedAudioDG`, the Equalizer APO runtime that
+  SSAP3 installed, and the driver package matched by original name **and**
+  provider;
+- removes `%ProgramData%\SSAP3`.
 
-The uninstaller does not re-enable Secure Boot because that setting belongs to
-UEFI firmware. Re-enable Secure Boot manually after SSAP3 is removed if no
-other test-signed driver requires it.
+It is safe to run more than once. If a step cannot be reverted, the manifest
+is kept so that the next run retries it.
 
-If the Apps & Features entry is damaged, run this fallback from an elevated
-PowerShell:
+## Verify a clean system
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File C:\ProgramData\SSAP3\package\Uninstall-SSAP3.ps1
+# Before installing:
+.\installer\Test-Ssap3SystemState.ps1 -Snapshot before.json
+# After uninstalling:
+.\installer\Test-Ssap3SystemState.ps1 -Snapshot after.json
+.\installer\Test-Ssap3SystemState.ps1 -Compare before.json after.json
 ```
+
+The comparison separates SSAP3 leftovers and changed security settings, which
+are failures, from unrelated changes made by you or other software, which are
+informational. `-Verify` alone checks that no SSAP3-owned object remains.
 
 ## Troubleshooting
 
-### Buttons change visually but AirPods do not respond
-
-- Open the AirPods case and reconnect.
-- Click **Repair** in SSAP3.
-- If the app reports that Test Mode is off, run `SSAP3-Setup.exe`, restart
-  when requested, and run setup once more.
-- In Device Manager → Bluetooth, confirm
-  **SSAP3 Apple Control Profile** has no warning icon.
-- Review `C:\ProgramData\SSAP3\install.log`.
-- Click **Report** and attach the resulting ZIP to a private support exchange
-  or a GitHub issue after reviewing its device addresses.
-
-### Fixed sounds the same as Off
-
-- Confirm output is **AirPods Stereo**.
-- Confirm SSAP3 reports the spatial engine as active.
-- Avoid ASIO and WASAPI exclusive mode, which can bypass endpoint effects.
-- Rerun setup to reattach the effect to the current AirPods endpoint.
-
-### Audio becomes telephone quality in Discord
-
-Do not select the AirPods microphone. Use AirPods Stereo for output and a
-different microphone for input.
-
-### Case battery is unavailable
-
-The case does not advertise continuously. Put at least one earbud in the case
-or open the lid near the computer and wait for a fresh Bluetooth LE packet.
-
-### Bluetooth or audio fails after installation
-
-1. Disconnect the USB Bluetooth adapter if one is used.
-2. Boot Windows in Safe Mode if normal startup is unstable.
-3. Use Apps & Features or the fallback uninstaller above.
-4. Restart Windows and reconnect the adapter.
-
-Do not delete arbitrary Bluetooth packages from Driver Store.
+| Symptom | What to check |
+| --- | --- |
+| "Bluetooth is off" | Turn on Bluetooth in Windows Settings. SSAP3 never changes the radio. |
+| "Connected (audio only)" | No Microsoft-signed AAP driver is installed. See *About the AAP driver*. |
+| Fixed and Off sound the same | The opt-in engine is not installed, the output is not **AirPods (Stereo)**, or the app uses WASAPI exclusive mode or ASIO, which bypass endpoint effects. |
+| Call audio sounds like a telephone | Using the AirPods microphone switches Bluetooth to the Hands-Free profile. Use another microphone. |
+| Head tracking turns the wrong way | Settings > Head tracking > **Invert yaw**. The AirPods Pro 3 orientation decoder is not hardware-verified yet. |
+| Need support data | **Report** creates a redacted local ZIP. Review it before sharing; nothing is uploaded. |

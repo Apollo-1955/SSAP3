@@ -9,9 +9,11 @@ Explain the problem or user impact.
 ## Validation
 
 - [ ] Managed application builds with zero warnings
-- [ ] Managed smoke tests pass
+- [ ] `dotnet test` passes (unit, simulated and randomized-input tests)
 - [ ] Spatializer builds and its smoke test passes, when applicable
 - [ ] Driver install and rollback were considered, when applicable
+- [ ] No Test Mode, Secure Boot, BCD or certificate changes were added to Setup
+- [ ] Hardware claims distinguish observed, simulated and unverified results
 - [ ] Logs and screenshots contain no Bluetooth addresses, keys, or private data
 
 ## Hardware tested

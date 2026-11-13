@@ -1,6 +1,6 @@
 # Contributing to SSAP3
 
-Contributions are welcome, especially:
+Contributions are welcome. Security and honesty rules from `docs/DEVELOPMENT.md` apply to every change. Especially welcome:
 
 - validation on more Windows 10/11 builds, Bluetooth adapters, and AirPods;
 - reconnect and transport reliability;
@@ -20,7 +20,7 @@ Contributions are welcome, especially:
 
    ```powershell
    dotnet build .\src\SSAP3.App\SSAP3.App.csproj -c Release
-   dotnet run --project .\tests\SSAP3.Core.SmokeTests\SSAP3.Core.SmokeTests.csproj -c Release
+   dotnet test .\tests\SSAP3.Core.Tests\SSAP3.Core.Tests.csproj -c Release
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\build-spatializer.ps1
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\test-spatializer.ps1
    ```
@@ -37,7 +37,8 @@ Driver pull requests need extra care:
 - avoid expanding the INF binding beyond the Apple AAP profile without a
   separate design discussion;
 - document install, rollback, and failure behavior;
-- never add a production-trusted signature to experimental code.
+- never add a production-trusted signature to experimental code;
+- never add Test Mode, BCD, Secure Boot or certificate-store changes to Setup.
 
 ## DSP changes
 

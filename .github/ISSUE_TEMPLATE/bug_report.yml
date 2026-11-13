@@ -7,26 +7,26 @@ body:
   - type: markdown
     attributes:
       value: |
-        Remove Bluetooth addresses, keys, certificate private keys, and other personal data before attaching logs.
+        SSAP3 reports are redacted by default. Still review them, and remove anything personal, before attaching logs. Report security issues privately (see SECURITY.md), not here.
   - type: input
     id: version
     attributes:
       label: SSAP3 version
-      placeholder: v0.3.0
+      placeholder: 0.5.0-dev (commit hash)
     validations:
       required: true
   - type: input
     id: windows
     attributes:
       label: Windows version and build
-      placeholder: Windows 11 24H2, build 26100
+      placeholder: Windows 11 25H2, build 26200
     validations:
       required: true
   - type: input
     id: airpods
     attributes:
       label: AirPods model
-      placeholder: AirPods 4 (ANC)
+      placeholder: AirPods Pro 3 (firmware version if known)
     validations:
       required: true
   - type: input

@@ -39,6 +39,28 @@ What follows from this:
    AirPods 4 (ANC) is PID `0x201B` → `0x1B20`. This has not yet been seen
    in a captured advertisement.
 
+### Later checks the same day
+
+- **Bluetooth radio was off.** The Windows radio API reported the Bluetooth
+  radio as Off (Wi-Fi On). With the radio off, the BLE advertisement watcher
+  fails with `0x800710DF`, so no advertisement could be captured, and the
+  AirPods Pro 3 advertisement model ID is still **inferred**. SSAP3 now shows
+  "Bluetooth is off" instead of crashing, and retries every 15 s. SSAP3
+  never turns the radio on itself.
+- **App on real hardware.** The SSAP3 Control Center launched on Windows 11
+  build 26200. The high-resolution waitable timer and `QueryInterruptTime`
+  kernel-timestamp domain were available. The panel showed Bluetooth off,
+  listening modes unavailable (no AAP driver), and the spatial engine not
+  installed. Those were the true states.
+- **Platform security baseline**, from `Test-Ssap3SystemState.ps1 -Verify`:
+  Secure Boot on, Memory Integrity (HVCI) on, Defender real-time protection
+  on. Any production AAP driver must therefore be HVCI-compatible and
+  Microsoft-signed.
+
+To capture the AirPods Pro 3 advertisement, turn Bluetooth on, open the case
+near the PC, and run `SSAP3-TransportProbe --ble 30`. The output redacts
+addresses.
+
 ## Feature matrix for AirPods Pro 3
 
 | Feature | Mechanism | Needs SSAP3 driver | Protocol source | Pro 3 status |
