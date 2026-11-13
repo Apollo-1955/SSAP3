@@ -123,8 +123,6 @@ exact and idempotent.
    client with Secure Boot and Memory Integrity on. They are not
    WHQL-certified. A self-signed certificate can never substitute for this.
 2. **Authenticode certificate** (OV or EV) for `SSAP3-Setup.exe` and the app.
-3. **GitHub Actions must be enabled on the fork** (Actions tab → enable
-   workflows) before CI results exist.
-4. **AirPods Pro 3 AACP validation** needs either the signed driver or a
+3. **AirPods Pro 3 AACP validation** needs either the signed driver or a
    separate development PC in Test Mode. The maintainer's main PC stays in
    its normal secure configuration.

@@ -275,9 +275,10 @@ can freeze or reject tracking. Fix: `GetTickCount64` on both sides.
 ### S-20 — Low — CI hardening gaps
 
 `.github/workflows/ci.yml` pins actions by tag, not by SHA, and has no
-static analysis, dependency, secret, driver or installer checks. Actions
-are not enabled on this fork (0 runs reported by the GitHub API). The
-workflow already uses `permissions: contents: read`, which is good.
+static analysis, dependency, secret, driver or installer checks. At audit
+time the fork had no workflow runs, because nothing had been pushed since it
+was forked. The workflow already uses `permissions: contents: read`, which
+is good.
 
 ### S-22 — Medium — Device security set where Plug and Play ignores it
 

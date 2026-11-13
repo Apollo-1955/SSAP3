@@ -158,7 +158,7 @@ the development PC).
 | SoundVolumeView | `third_party/SoundVolumeView` | **Not yet verified / Improve** | Unsigned third-party freeware binary committed to git, used only to switch Windows Sonic off. Add integrity pinning, then look at removing it. |
 | Installer | `installer/*.ps1`, `SoundStage.iss` | **Replace** | Test Mode, root trust and user-writable elevated scripts. There is no manifest and no rollback. |
 | Uninstaller | `installer/Uninstall-*.ps1` | **Replace** | Trusts user-writable state, never restores ACL/ownership changes, and is not idempotent around Test Mode. |
-| CI | `.github/workflows/ci.yml` | **Improve** | No driver build, static analysis, dependency or secret scanning. Actions are **not enabled on the fork**: the GitHub API reports 0 workflow runs. |
+| CI | `.github/workflows/ci.yml` | **Improve** | No driver build, static analysis, dependency or secret scanning. The fork had no workflow runs at audit time (nothing pushed since forking). |
 | Brand assets | `assets/` | **Replace** | Rebrand to SSAP3. |
 | Docs | `README.md`, `docs/*` | **Replace** | They document the Test Mode installation. |
 

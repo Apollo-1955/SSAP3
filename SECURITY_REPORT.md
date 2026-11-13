@@ -38,7 +38,7 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-17 | Low | Substring-matched forced driver deletion | **Fixed** | Matched by `pnputil` original name **and** provider; `/force` dropped. |
 | S-18 | Low | Unbounded log and settings | **Fixed** | Log rotates at 1 MiB and is redacted. Settings capped at 64 KiB and validated. |
 | S-19 | Low | Wall-clock IPC timestamps | **Fixed** | `GetTickCount64` on both sides. |
-| S-20 | Low | CI hardening gaps | **Fixed (not yet run)** | Actions pinned by SHA. Least-privilege permissions. CodeQL (C#, C/C++), gitleaks, dependency review, NuGet audit, script checks. **Actions are disabled on the fork until the owner enables them.** |
+| S-20 | Low | CI hardening gaps | **Fixed** | Actions pinned by SHA. Least-privilege permissions. CodeQL (C#, C/C++), gitleaks, dependency review, NuGet audit, script checks. First run (#1, `414b091`): CodeQL C# and C/C++, gitleaks and script checks passed. |
 | S-21 | Info | Unsigned artifacts | **Open** | Needs an OV/EV code-signing certificate. |
 | S-22 | Medium | INF set device security in the software key, where PnP ignores it | **Fixed (compiled in CI only)** | `Security`, `DeviceCharacteristics` (`FILE_DEVICE_SECURE_OPEN`) and `DeviceType` moved to the `.HW` section. Runtime effect needs verification on hardware. |
 
@@ -105,7 +105,8 @@ after setup.
 | `Test-Ssap3SystemState.ps1 -Verify` (read-only) | Pass. Baseline: Secure Boot on, Memory Integrity on, Defender real-time on, `DisableProtectedAudioDG` absent |
 | Secret scan (`git grep` for key headers and tokens) | 0 secrets |
 | App launch on real Windows 11 26200 | Starts; honest states shown (Bluetooth off, AAP driver missing, engine not installed). A TimeSpan overflow crash found by this run was **fixed**. |
-| **Not performed** | C/C++ compilation (no MSVC/WDK locally); CodeQL; gitleaks in CI; Driver Verifier; Application Verifier; ASan/UBSan; coverage-guided fuzzing; installer and uninstaller execution; any AirPods hardware test |
+| CI run #1 (GitHub Actions, `414b091`) | CodeQL `security-extended` for C# and C/C++: pass. gitleaks: pass. Script parse and forbidden-operation checks: pass. Spatial engine compiled under `/W4 /WX /guard:cf`. Spatial-engine tests and the managed test build failed (fixed in the next commits; see `DEVELOPMENT_STATUS.md`). |
+| **Not performed** | Driver compilation (not reached in run #1); Driver Verifier; Application Verifier; ASan/UBSan; coverage-guided fuzzing; installer and uninstaller execution; any AirPods hardware test |
 
 ## 7. Driver security review (source)
 

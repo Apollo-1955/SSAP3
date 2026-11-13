@@ -46,29 +46,32 @@ The status legend:
 | Core tests (115) | ✓ | ✓ | ✓ | — |
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
-| Spatial engine (C++) and its tests | ✓ | written, not compiled | ✗ (no MSVC) | — |
-| Driver (C) | ✓ | — | ✗ (no WDK) | — |
+| Spatial engine (C++) and its tests | ✓ | compiled in CI; tests failed in run #1 | ✗ (no MSVC locally) | — |
+| Driver (C) | ✓ | — | ✗ (no WDK locally; not reached in CI run #1) | — |
 | Installer and uninstaller | ✓ | parse-checked | ✗ (needs admin and changes the audio stack) | — |
 | System-state verifier | ✓ | — | ✓ (`-Verify` pass) | n/a |
-| CI workflow | ✓ | — | ✗ (Actions disabled on the fork) | n/a |
+| CI workflow | ✓ | — | ✓ (runs on every push) | n/a |
+
+## CI history
+
+| Run | Commit | Result |
+| --- | --- | --- |
+| #1 | `414b091` | CodeQL C# and C/C++, gitleaks and script checks passed. The spatial engine compiled cleanly. Two failures: the managed test build (the runner used a newer SDK, and C# 14 binds `array.Reverse()` to the in-place span overload) and the spatial-engine tests (failure text only in the sign-in-gated log). Fixed with a `global.json` SDK pin, an explicit `Enumerable.Reverse`, test-failure annotations, and a separate driver job. |
 
 ## Blockers (need the maintainer)
 
-1. **Enable GitHub Actions** on the fork (Actions tab). This is needed for
-   the first C/C++ compile, CodeQL and gitleaks results.
-2. **Microsoft attestation signing** for `ssap3aap.sys`: EV certificate plus
+1. **Microsoft attestation signing** for `ssap3aap.sys`: EV certificate plus
    Partner Center. Without it the AAP features cannot run on a Secure Boot
    PC, by design.
-3. **Hardware validation:** turn Bluetooth on and run
+2. **Hardware validation:** turn Bluetooth on and run
    `SSAP3-TransportProbe --ble 30` to confirm model ID `0x2720`. AACP and
    motion tests need the signed driver, or a separate development PC
    (`tools/dev`).
-4. **Code-signing certificate** for `SSAP3-Setup.exe`.
+3. **Code-signing certificate** for `SSAP3-Setup.exe`.
 
 ## Next steps
 
-1. Fix whatever the first CI run reports (native code has never been
-   compiled).
+1. Make CI fully green: spatial-engine tests and the first driver compile.
 2. Run the installer and uninstaller on a disposable Windows 11 VM with
    before/after snapshots.
 3. HRIR convolution renderer and SOFA import (ADR-5), with a fuzzed loader.
