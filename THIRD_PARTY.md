@@ -107,7 +107,8 @@ commercial application."
 - **What SSAP3 includes:** only a derived table,
   `audio/SSAP3Spatializer/ssap3_hrir_data.h`. Each response is onset-aligned
   and truncated to 96 of its original 128 taps, and the 16-bit values are
-  unchanged. The original archive is not redistributed.
+  unchanged. The table also holds a timbre-correction EQ fitted to the data.
+  The original archive is not redistributed.
 - **Source archive:** `diffuse.zip`, SHA-256
   `A48E73137390626EF1E45D1DE6A4D98530C6AA570E71B40F7C4442241ED5FA22`.
 - **Converter:** `tools/hrtf/HrirTableBuilder`. See `tools/hrtf/README.md`.

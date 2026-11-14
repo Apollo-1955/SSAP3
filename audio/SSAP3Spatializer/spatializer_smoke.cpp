@@ -55,6 +55,7 @@ struct StateRequest
     float speakerElevation = 0.0f;
     float roomMix = 1.0f;
     float intensity = 1.0f;
+    std::int32_t renderer = 0; // 0 = measured, 1 = classic
 };
 
 void WriteState(const StateRequest& request)
@@ -113,6 +114,7 @@ void WriteState(const StateRequest& request)
     state->version = ssap3::kSharedStateVersion;
     state->mode = request.mode;
     state->trackingState = request.tracking;
+    state->renderer = request.renderer;
     if (request.useYaw)
     {
         // Yaw is positive to the LEFT: rotation about +Z.
@@ -286,7 +288,7 @@ bool SameState(const StateRequest& a, const StateRequest& b)
         std::equal(std::begin(a.quaternion), std::end(a.quaternion), std::begin(b.quaternion)) &&
         a.tickOffsetMs == b.tickOffsetMs && a.speakerAzimuth == b.speakerAzimuth &&
         a.speakerDistance == b.speakerDistance && a.speakerElevation == b.speakerElevation &&
-        a.roomMix == b.roomMix && a.intensity == b.intensity;
+        a.roomMix == b.roomMix && a.intensity == b.intensity && a.renderer == b.renderer;
 }
 
 // Deterministic, uncorrelated white noise in each channel.
@@ -420,6 +422,80 @@ double IldDb(const EarResponse& response)
 double ItdMs(const EarResponse& response)
 {
     return OnsetMs(response.left, response.sampleRate) - OnsetMs(response.right, response.sampleRate);
+}
+
+// |DFT|^2 of a response at one frequency.
+double PowerAt(const std::vector<float>& signal, double frequency, double sampleRate)
+{
+    double real = 0.0;
+    double imaginary = 0.0;
+    const double step = 2.0 * 3.141592653589793 * frequency / sampleRate;
+    for (std::size_t index = 0; index < signal.size(); ++index)
+    {
+        real += signal[index] * std::cos(step * static_cast<double>(index));
+        imaginary -= signal[index] * std::sin(step * static_cast<double>(index));
+    }
+    return real * real + imaginary * imaginary;
+}
+
+struct ToneBalance
+{
+    double bassDb = 0.0;    // mean of the 1/3-octave bands from 40 to 160 Hz
+    double lowestDb = 0.0;  // extremes of the bands from 40 Hz to 12.5 kHz
+    double highestDb = 0.0;
+};
+
+// Power response at one ear for uncorrelated stereo (near + far speaker),
+// 1/3-octave smoothed, relative to its 300 Hz - 3 kHz mean.
+ToneBalance StageTone(const std::vector<float>& near, const std::vector<float>& far, double sampleRate)
+{
+    std::vector<std::pair<double, double>> bands;
+    for (double centre = 31.5; centre <= 16500.0; centre *= std::pow(2.0, 1.0 / 3.0))
+    {
+        double power = 0.0;
+        int count = 0;
+        for (double frequency = centre * std::pow(2.0, -1.0 / 6.0); frequency <= centre * std::pow(2.0, 1.0 / 6.0);
+             frequency *= std::pow(2.0, 1.0 / 24.0))
+        {
+            power += PowerAt(near, frequency, sampleRate) + PowerAt(far, frequency, sampleRate);
+            ++count;
+        }
+        bands.emplace_back(centre, power / std::max(count, 1));
+    }
+
+    double reference = 0.0;
+    int referenceCount = 0;
+    for (const auto& [centre, power] : bands)
+    {
+        if (centre >= 300.0 && centre <= 3000.0)
+        {
+            reference += power;
+            ++referenceCount;
+        }
+    }
+    reference /= std::max(referenceCount, 1);
+
+    ToneBalance balance{};
+    balance.lowestDb = 1.0e9;
+    balance.highestDb = -1.0e9;
+    double bass = 0.0;
+    int bassCount = 0;
+    for (const auto& [centre, power] : bands)
+    {
+        const double db = 10.0 * std::log10(std::max(power, 1.0e-30) / reference);
+        if (centre >= 39.0 && centre <= 12700.0)
+        {
+            balance.lowestDb = std::min(balance.lowestDb, db);
+            balance.highestDb = std::max(balance.highestDb, db);
+        }
+        if (centre >= 39.0 && centre <= 165.0)
+        {
+            bass += db;
+            ++bassCount;
+        }
+    }
+    balance.bassDb = bass / std::max(bassCount, 1);
+    return balance;
 }
 
 double NormalizedDifference(const std::vector<float>& reference, const std::vector<float>& other)
@@ -590,6 +666,54 @@ int wmain(int argc, wchar_t** argv)
         Require(NormalizedDifference(left30.left, ImpulseResponse(entry, raised, 0).left) > 0.2,
             "Speaker elevation does not change the measured response.");
 
+        // Timbre: with the stage EQ the default stage is close to flat, and the
+        // bass the short measurements lose is back (engine 2.6 was 6-9 dB down
+        // below 100 Hz, and 3-14 dB off around 1.3, 4 and 8 kHz).
+        const ToneBalance tone = StageTone(left30.left, right30.left, 48000.0);
+        Require(tone.bassDb > -3.0 && tone.bassDb < 3.0, "The measured stage's bass (40-160 Hz) is not within 3 dB of its mid-range.");
+        Require(tone.lowestDb > -6.0 && tone.highestDb < 4.0,
+            "The measured stage's 1/3-octave balance (40 Hz - 12.5 kHz) is outside -6/+4 dB of its mid-range.");
+
+        // The classic renderer (engine 2.5's parametric model) is still selectable.
+        StateRequest classicStage = stage;
+        classicStage.renderer = 1;
+        const EarResponse classicLeft = ImpulseResponse(entry, classicStage, 0);
+        Require(IldDb(classicLeft) < -2.0 && ItdMs(classicLeft) < -0.1,
+            "The classic renderer does not put the left speaker on the left.");
+        Require(NormalizedDifference(left30.left, classicLeft.left) > 0.2, "The classic renderer sounds the same as the measured one.");
+
+        // Any other renderer value rejects the whole record (engine stays bypassed).
+        for (const std::int32_t bad : {2, -1, 1000})
+        {
+            StateRequest badRenderer = fixed;
+            badRenderer.renderer = bad;
+            const Buffers badOutput = Render(entry, badRenderer, input);
+            Require(badOutput[0] == input[0] && badOutput[1] == input[1], "An invalid renderer value was not rejected.");
+        }
+
+        // Switching renderers crossfades (measured -> classic -> measured).
+        {
+            constexpr std::int32_t block = 256;
+            StateRequest still = stage;
+            still.roomMix = 0.0f;
+            float baseline = 0.0f;
+            for (const std::int32_t renderer : {0, 1})
+            {
+                still.renderer = renderer;
+                const Buffers output = Stream(entry, MakeTones(block * 64), block, [&still](std::int32_t) { return still; });
+                baseline = std::max(baseline, MaxStepBoth(output, static_cast<std::size_t>(block) * 16));
+            }
+
+            StateRequest switching = still;
+            const Buffers switched = Stream(entry, MakeTones(block * 96), block, [&switching](std::int32_t index)
+            {
+                switching.renderer = (index / 32) % 2 == 0 ? 0 : 1;
+                return switching;
+            });
+            Require(MaxStepBoth(switched, static_cast<std::size_t>(block) * 16) < baseline * 1.3f,
+                "Switching renderers produced a step (click).");
+        }
+
         // The same cues at every device rate (the table is 44.1 kHz).
         for (const float rate : {44100.0f, 96000.0f, 192000.0f})
         {
@@ -737,6 +861,9 @@ int wmain(int argc, wchar_t** argv)
                   << "HRIR at -30 deg: ILD=" << ild30 << " dB, ITD=" << itd30 << " ms; at -90 deg: ILD="
                   << IldDb(leftSide) << " dB, ITD=" << ItdMs(leftSide) << " ms; front/back=" << frontBackDb
                   << " dB" << std::endl
+                  << "Stage tone: bass=" << tone.bassDb << " dB, 1/3-octave range " << tone.lowestDb << " to "
+                  << tone.highestDb << " dB; classic at -30 deg: ILD=" << IldDb(classicLeft) << " dB, ITD="
+                  << ItdMs(classicLeft) << " ms" << std::endl
                   << "Loudness vs input=" << loudnessDb << " dB, head-sweep step ratio=" << sweepRatio
                   << ", real-time factor=" << realTimeFactor << std::endl;
         return 0;

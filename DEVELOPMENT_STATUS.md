@@ -11,7 +11,7 @@
 | 2 | Project transformation (identity, security fixes, CI) | **Done in source.** Native code and CI not yet executed |
 | 3 | Bluetooth and AAP | **Implemented and unit-tested.** Not hardware-verified (no signed driver) |
 | 4 | Motion streaming and quaternion head tracking | **Implemented and unit-tested.** Not hardware-verified |
-| 5 | Spatial engine | **Implemented:** measured-HRIR (MIT KEMAR) convolution with crossfaded updates, configurable stage and room. Not yet heard on AirPods (reinstall pending). SOFA import not started |
+| 5 | Spatial engine | **Implemented:** measured-HRIR (MIT KEMAR) convolution with crossfaded updates and a fitted timbre correction; the classic parametric renderer is selectable; configurable stage and room. 2.6.0 was heard and judged worse; 2.7.0 (the fixes) not yet heard. SOFA import not started |
 | 6 | Windows audio integration | **Partial:** opt-in Equalizer APO host with exact restore. Exclusive-mode detection not started |
 | 7 | AirPods controls | **Partial:** confirmed listening modes; conversation switching on AirPods speech notifications. Mic VAD not wired; AACP battery parsed |
 | 8 | App and tray | **Partial:** tray panel and a 5-tab settings window. Not the full 11-page app |
@@ -52,7 +52,7 @@ The status legend:
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
-| Measured-HRIR renderer (KEMAR table, offline converter, crossfaded updates) | ✓ | ✓ design checked offline (C# port on the generated table); **CI run #19: `/W4 /WX` build, CodeQL clean, all HRIR, click and real-time tests pass** (`docs/TECHNICAL_REPORT.md` §5.3) | ✗ (no MSVC locally; the new DLL is not installed) | — (the installed engine is still the parametric build) |
+| Measured-HRIR renderer (KEMAR table, offline converter, crossfaded updates) | ✓ | ✓ design checked offline (C# port on the generated table); **CI run #19: `/W4 /WX` build, CodeQL clean, all HRIR, click and real-time tests pass** (`docs/TECHNICAL_REPORT.md` §5.3) | ✓ engine 2.6.0 installed 2026-11-14 (digest-verified CI artifact; reinstall log clean) | **Listened, negative:** the user found 2.6.0 worse than the parametric build (thin bass, harsh or muffled tone, space felt wrong). 2.7.0 adds a fitted timbre correction and a Classic/Measured switch; not yet heard |
 | Driver (C) | ✓ | compiles, links, passes InfVerif, the HVCI image checks, Microsoft's driver CodeQL suites and Inf2Cat; submission CAB built (CI run #12). Not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
 | Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; the app writes fresh state (≈200 ms old, engine limit 750 ms) | **Fixed mode ✓:** the user heard a clear difference between Off and Fixed on AirPods Pro 3 (subjective listening test, 2026-11-13; state record confirmed `Mode=Fixed`). Tracked mode not verified (needs the signed AAP driver) |

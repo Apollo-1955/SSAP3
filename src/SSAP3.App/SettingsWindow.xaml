@@ -78,6 +78,11 @@
                                 <Ellipse Canvas.Left="134" Canvas.Top="136" Width="32" Height="32" Fill="#F6F9FF" />
                                 <Line x:Name="RoomNose" X1="150" Y1="152" X2="150" Y2="120" Stroke="#F6F9FF" StrokeThickness="4" StrokeEndLineCap="Round" />
                             </Canvas>
+                            <TextBlock Text="Renderer" FontSize="12" />
+                            <RadioButton x:Name="RendererMeasuredRadio" GroupName="Renderer" Foreground="#F8FAFF" Margin="0,3"
+                                         Content="Measured: dummy-head HRTFs (MIT KEMAR), timbre-corrected" Click="Renderer_OnChanged" />
+                            <RadioButton x:Name="RendererClassicRadio" GroupName="Renderer" Foreground="#F8FAFF" Margin="0,3,0,10"
+                                         Content="Classic: the earlier model (time and level differences, head shadow)" Click="Renderer_OnChanged" />
                             <TextBlock x:Name="AzimuthLabel" Text="Speaker angle" FontSize="12" />
                             <Slider x:Name="AzimuthSlider" Minimum="10" Maximum="90" ValueChanged="StageSlider_OnValueChanged" />
                             <TextBlock x:Name="DistanceLabel" Text="Distance" FontSize="12" />
@@ -92,7 +97,7 @@
                         </StackPanel>
                     </Border>
                     <TextBlock Style="{StaticResource Note}"
-                               Text="The renderer uses measured head-related responses from a generic dummy head (MIT KEMAR), interpolated for every head direction, plus a compact treated room. It is not personalised: it does not give Apple's Personalized Spatial Audio or use an ear scan." />
+                               Text="Measured uses head-related responses from a generic dummy head (MIT KEMAR), interpolated for every head direction and equalised so the stage sounds tonally neutral. Classic is the earlier model. Both add a compact treated room, and switching between them is seamless, so compare them while listening. Neither is personalised: they do not give Apple's Personalized Spatial Audio or use an ear scan." />
                 </StackPanel>
             </ScrollViewer>
         </TabItem>

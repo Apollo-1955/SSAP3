@@ -25,13 +25,18 @@ dotnet run --project tools\hrtf\HrirTableBuilder\HrirTableBuilder.csproj -c Rele
     <unpacked diffuse folder> <path to diffuse.zip> audio\SSAP3Spatializer\ssap3_hrir_data.h
 ```
 
-Expected output for the archive above:
+Expected output for the archive above (abridged):
 
 ```
 Wrote audio\SSAP3Spatializer\ssap3_hrir_data.h: 368 directions x 2 ears x 96 taps; minimum retained energy 99.02 %; scale 3.77974E-05.
 Right-side check at 0/90: right ear 14.8 dB louder, 30 samples earlier.
 Max onset shift: 33 samples; ...
+Stage EQ: 6 biquads, residual 0.59 dB RMS.
+  low shelf    132.9 Hz  Q 0.646   +8.81 dB
+  ...
 ```
+
+It then prints the stage's response before and after the correction.
 
 The output is deterministic: the same archive gives a byte-identical header.
 
@@ -50,6 +55,20 @@ The output is deterministic: the same archive gives a byte-identical header.
 4. Each response is truncated to 96 taps. The build stops if any response
    keeps less than 97 % of its energy (the actual minimum is 99.02 %).
 5. One scale factor normalises the set to diffuse-field unit power.
+6. **Stage timbre correction.** The tool fits a short biquad chain (one low
+   shelf, then peaking filters) that flattens the power response of the
+   default ±30° stage at the ears:
+   - the response is 1/3-octave smoothed;
+   - the correction is limited to -6/+9 dB, and treble boosts to +6 dB,
+     because pinna notches move with direction and are only partly filled;
+   - there is no correction above 16 kHz;
+   - the fit is deterministic (greedy placement, then coordinate descent).
+
+   The fit restores the bass that 128-tap measurements cannot hold (the
+   diffuse-field average of the whole set falls about 9 dB from 300 Hz to
+   20 Hz) and removes the ±30° colouration. The engine designs these filters
+   at the device rate and applies them to both ears alike, so interaural
+   differences are unchanged.
 
 The engine also checks the table's layout with `static_assert`s (ring order,
 azimuth range, onset bounds against its input history), so a malformed

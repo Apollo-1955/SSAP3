@@ -12,7 +12,12 @@
 // four nearest measurements are blended bilinearly for the head-relative
 // direction, resampled to the device rate with a band-limited kernel that
 // also applies the sub-sample onset (ITD), and the output crossfades from the
-// previous filters to the new ones, so head movement never clicks.
+// previous filters to the new ones, so head movement never clicks. A fitted
+// stage EQ (also in ssap3_hrir_data.h) then flattens the stage's timbre and
+// restores the bass the short measurements lose, alike for both ears.
+//
+// The classic renderer (engine 2.5's parametric model) is kept as a choice;
+// the shared record selects one, and a change crossfades over one block.
 
 // Also passed on the command line; repeated so every build of this file is safe
 // from the windows.h min/max macros.
@@ -70,12 +75,16 @@ constexpr float kMaxSampleRate = 384000.0f;
 // Filters are rebuilt (and crossfaded) when a speaker's head-relative
 // direction moves further than this from the one they were built for.
 constexpr float kDirectionEpsilonDegrees = 0.02f;
-// Direct-path level. With the diffuse-field unit-power table, the default
-// +-30 degree stage at 48 kHz has a coherent near+far ear gain of 2.08 at
-// 500 Hz and a white-noise power of 2.25 per ear; 0.40 brings both to the
-// parametric renderer this replaced (0.82 and 0.37), so loudness and
-// clipping headroom stay the same.
-constexpr float kHrirTrim = 0.40f;
+// Direct-path level of the measured renderer. With the diffuse-field
+// unit-power table and the stage timbre correction, the default +-30 degree
+// stage at 48 kHz has a coherent (mono) near+far ear gain of at most 2.41 below
+// 1 kHz (2.62 at 15 kHz). 0.35 brings that to 0.84, the classic renderer's
+// 0.82, so clipping headroom for centred bass is unchanged.
+constexpr float kHrirTrim = 0.35f;
+// Direct-path level of the classic (parametric) renderer, as in engine 2.5.
+constexpr float kClassicTrim = 0.65f;
+constexpr int kMaxStageEq = 8;
+static_assert(hrir::kStageEqCount <= kMaxStageEq, "Too many stage EQ biquads.");
 
 // Compile-time checks of the generated table: the lookup below relies on
 // these properties, so a malformed table fails the build instead of reading
@@ -188,6 +197,27 @@ struct Vector3
     float z = 0.0f;
 };
 
+// Classic renderer: per-speaker parametric cues, interpolated per sample.
+struct RenderParameters
+{
+    float gainLeft = 0.0f;
+    float gainRight = 0.0f;
+    float delayLeft = 0.0f;
+    float delayRight = 0.0f;
+    float alphaLeft = 1.0f;
+    float alphaRight = 1.0f;
+};
+
+// Stage timbre correction biquad, normalised so a0 = 1.
+struct Biquad
+{
+    double b0 = 1.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+};
+
 struct StageSettings
 {
     float speakerAzimuth = 30.0f;
@@ -200,6 +230,7 @@ struct StageSettings
 struct ValidatedState
 {
     ssap3::SpatialMode mode = ssap3::SpatialMode::Off;
+    ssap3::Renderer renderer = ssap3::Renderer::Measured;
     bool trackedPoseUsable = false;
     Quaternion orientation{};
     StageSettings stage{};
@@ -428,7 +459,9 @@ bool Ssap3ValidateState(const ssap3::SharedStateV2& snapshot, ValidatedState& re
     if (snapshot.magic != ssap3::kSharedStateMagic ||
         snapshot.version != ssap3::kSharedStateVersion ||
         snapshot.mode < static_cast<std::int32_t>(ssap3::SpatialMode::Off) ||
-        snapshot.mode > static_cast<std::int32_t>(ssap3::SpatialMode::Tracked))
+        snapshot.mode > static_cast<std::int32_t>(ssap3::SpatialMode::Tracked) ||
+        (snapshot.renderer != static_cast<std::int32_t>(ssap3::Renderer::Measured) &&
+         snapshot.renderer != static_cast<std::int32_t>(ssap3::Renderer::Classic)))
     {
         return false;
     }
@@ -443,6 +476,7 @@ bool Ssap3ValidateState(const ssap3::SharedStateV2& snapshot, ValidatedState& re
     }
 
     result.mode = static_cast<ssap3::SpatialMode>(snapshot.mode);
+    result.renderer = static_cast<ssap3::Renderer>(snapshot.renderer);
     result.stage.speakerAzimuth = snapshot.speakerAzimuthDegrees;
     result.stage.speakerDistance = snapshot.speakerDistanceMeters;
     result.stage.speakerElevation = snapshot.speakerElevationDegrees;
@@ -508,7 +542,7 @@ public:
         effect_.ioRatio = 1.0f;
         effect_.object = this;
         effect_.uniqueId = kSsap3UniqueId;
-        effect_.version = 0x00020600;
+        effect_.version = 0x00020700;
         effect_.processReplacing = ProcessReplacing;
         ResetDsp();
     }
@@ -580,7 +614,7 @@ private:
             CopyText(pointer, "SSAP3 contributors", 64);
             return 1;
         case effGetVendorVersion:
-            return 20600;
+            return 20700;
         case effCanDo:
             if (pointer == nullptr)
             {
@@ -692,9 +726,30 @@ private:
             crossfade = true;
         }
 
+        // Classic renderer targets for this block (interpolated per sample).
+        const RenderParameters leftTarget = CalculateParameters(directions[0].azimuth, directions[0].elevation);
+        const RenderParameters rightTarget = CalculateParameters(directions[1].azimuth, directions[1].elevation);
+        if (!parametersPrimed_)
+        {
+            leftParameters_ = leftTarget;
+            rightParameters_ = rightTarget;
+            parametersPrimed_ = true;
+        }
+
+        // Both renderers run every sample so that either can take over
+        // without a cold start; a renderer change crossfades over one block.
+        const ssap3::Renderer targetRenderer = state.renderer;
+        if (!rendererPrimed_)
+        {
+            activeRenderer_ = targetRenderer;
+            rendererPrimed_ = true;
+        }
+        const ssap3::Renderer fromRenderer = activeRenderer_;
+        const bool rendererFade = fromRenderer != targetRenderer;
+
         const FilterBank& current = banks_[activeBank_];
         const FilterBank& previous = banks_[activeBank_ ^ 1];
-        const float directGain = kHrirTrim * std::clamp(1.0f / stage.speakerDistance, 0.35f, 1.5f);
+        const float distanceGain = std::clamp(1.0f / stage.speakerDistance, 0.35f, 1.5f);
         const float earlyMix = 0.285f * stage.roomMix;
         const float lateMix = 0.16f * stage.roomMix;
         const float mixStep = 1.0f / std::max(1.0f, kMixRampSeconds * sampleRate_);
@@ -706,24 +761,49 @@ private:
             const float inputRight = inputs[1][frame];
             delayLeft_[writeIndex_] = Sanitize(inputLeft);
             delayRight_[writeIndex_] = Sanitize(inputRight);
+            const float progress = static_cast<float>(frame + 1) * inverseFrames;
 
-            std::array<float, 2> direct{};
+            // Measured renderer: HRIR convolution, then the stage timbre correction.
+            std::array<float, 2> measured{};
             for (int ear = 0; ear < 2; ++ear)
             {
                 float value = Convolve(delayLeft_, current[0][ear]) + Convolve(delayRight_, current[1][ear]);
                 if (crossfade)
                 {
-                    const float progress = static_cast<float>(frame + 1) * inverseFrames;
                     const float old = Convolve(delayLeft_, previous[0][ear]) + Convolve(delayRight_, previous[1][ear]);
                     value = old + (value - old) * progress;
                 }
-                direct[ear] = value;
+                measured[ear] = static_cast<float>(ApplyStageEq(static_cast<double>(value), ear)) * kHrirTrim;
+            }
+
+            // Classic renderer (engine 2.5): fractional ITD, level and head-shadow low-pass.
+            const RenderParameters left = Lerp(leftParameters_, leftTarget, progress);
+            const RenderParameters right = Lerp(rightParameters_, rightTarget, progress);
+            const float leftToLeft = FilterContribution(
+                ReadDelay(delayLeft_, left.delayLeft), leftLowPass_[0], left.alphaLeft);
+            const float leftToRight = FilterContribution(
+                ReadDelay(delayLeft_, left.delayRight), leftLowPass_[1], left.alphaRight);
+            const float rightToLeft = FilterContribution(
+                ReadDelay(delayRight_, right.delayLeft), rightLowPass_[0], right.alphaLeft);
+            const float rightToRight = FilterContribution(
+                ReadDelay(delayRight_, right.delayRight), rightLowPass_[1], right.alphaRight);
+            const std::array<float, 2> classic{
+                (leftToLeft * left.gainLeft + rightToLeft * right.gainLeft) * kClassicTrim,
+                (leftToRight * left.gainRight + rightToRight * right.gainRight) * kClassicTrim};
+
+            const std::array<float, 2>& to = targetRenderer == ssap3::Renderer::Classic ? classic : measured;
+            const std::array<float, 2>& from = fromRenderer == ssap3::Renderer::Classic ? classic : measured;
+            std::array<float, 2> direct = to;
+            if (rendererFade)
+            {
+                direct[0] = from[0] + (to[0] - from[0]) * progress;
+                direct[1] = from[1] + (to[1] - from[1]) * progress;
             }
 
             const auto early = CalculateEarlyReflections();
             const auto late = ProcessRoom(0.5f * (delayLeft_[writeIndex_] + delayRight_[writeIndex_]));
-            const float wetLeft = direct[0] * directGain + early[0] * earlyMix + late[0] * lateMix;
-            const float wetRight = direct[1] * directGain + early[1] * earlyMix + late[1] * lateMix;
+            const float wetLeft = direct[0] * distanceGain + early[0] * earlyMix + late[0] * lateMix;
+            const float wetRight = direct[1] * distanceGain + early[1] * earlyMix + late[1] * lateMix;
 
             if (mix_ < targetMix)
             {
@@ -741,10 +821,90 @@ private:
             writeIndex_ = (writeIndex_ + 1) & kDelayMask;
         }
 
+        leftParameters_ = leftTarget;
+        rightParameters_ = rightTarget;
+        activeRenderer_ = targetRenderer;
         if (!RenderStateIsFinite())
         {
             ResetFilterState();
         }
+    }
+
+    // Stage timbre correction: the fitted biquads in transposed direct form II
+    // (double precision, so the low shelf stays accurate at high rates).
+    double ApplyStageEq(double input, int ear)
+    {
+        double value = input;
+        for (int index = 0; index < stageEqCount_; ++index)
+        {
+            const Biquad& filter = stageEq_[index];
+            std::array<double, 2>& z = eqState_[ear][index];
+            const double output = filter.b0 * value + z[0];
+            z[0] = filter.b1 * value - filter.a1 * output + z[1];
+            z[1] = filter.b2 * value - filter.a2 * output;
+            value = output;
+        }
+        return value;
+    }
+
+    // Azimuth in degrees, positive to the listener's right; elevation in degrees.
+    // The classic (engine 2.5) parametric model, unchanged.
+    RenderParameters CalculateParameters(float azimuthDegrees, float elevationDegrees) const
+    {
+        const float azimuth = IsFinite(azimuthDegrees) ? azimuthDegrees : 0.0f;
+        const float elevation = IsFinite(elevationDegrees) ? elevationDegrees : 0.0f;
+        const float radians = azimuth * kDegreesToRadians;
+        const float side = std::sin(radians);
+        const float rear = std::max(0.0f, -std::cos(radians));
+        const float lateral = std::abs(side);
+        const float height = std::sin(std::clamp(elevation, -90.0f, 90.0f) * kDegreesToRadians);
+
+        const float itdSamples = lateral * std::cos(elevation * kDegreesToRadians) * 0.00067f * sampleRate_;
+        const float brightness = 1.0f + 0.15f * height;
+        const float farEarGain = 0.59f - 0.19f * lateral - 0.06f * rear;
+        const float nearEarGain = 0.72f + 0.14f * lateral - 0.04f * rear;
+        const float farCutoff = std::clamp(
+            (7600.0f - 4800.0f * lateral - 1700.0f * rear) * brightness, 1500.0f, 8800.0f);
+        const float nearCutoff = std::clamp(
+            (16500.0f - 3500.0f * rear) * brightness, 9000.0f, 18000.0f);
+
+        RenderParameters parameters{};
+        if (side >= 0.0f)
+        {
+            parameters.gainLeft = farEarGain;
+            parameters.gainRight = nearEarGain;
+            parameters.delayLeft = itdSamples;
+            parameters.delayRight = 0.0f;
+            parameters.alphaLeft = LowPassAlpha(farCutoff);
+            parameters.alphaRight = LowPassAlpha(nearCutoff);
+        }
+        else
+        {
+            parameters.gainLeft = nearEarGain;
+            parameters.gainRight = farEarGain;
+            parameters.delayLeft = 0.0f;
+            parameters.delayRight = itdSamples;
+            parameters.alphaLeft = LowPassAlpha(nearCutoff);
+            parameters.alphaRight = LowPassAlpha(farCutoff);
+        }
+        return parameters;
+    }
+
+    static RenderParameters Lerp(const RenderParameters& a, const RenderParameters& b, float t)
+    {
+        return RenderParameters{
+            a.gainLeft + (b.gainLeft - a.gainLeft) * t,
+            a.gainRight + (b.gainRight - a.gainRight) * t,
+            a.delayLeft + (b.delayLeft - a.delayLeft) * t,
+            a.delayRight + (b.delayRight - a.delayRight) * t,
+            a.alphaLeft + (b.alphaLeft - a.alphaLeft) * t,
+            a.alphaRight + (b.alphaRight - a.alphaRight) * t};
+    }
+
+    static float FilterContribution(float input, float& state, float alpha)
+    {
+        state += alpha * (input - state);
+        return state;
     }
 
     Direction HeadRelativeDirection(float worldAzimuth, float worldElevation) const
@@ -840,6 +1000,67 @@ private:
         filter.wholeDelay = whole;
     }
 
+    // Designs the fitted stage EQ (ssap3_hrir_data.h) at the device rate with
+    // the RBJ cookbook formulas the offline fitter used. Filters at or above
+    // 0.45 x the rate are skipped (for example the treble ones at 8 or 16 kHz).
+    // Dispatcher thread only.
+    void ConfigureStageEq()
+    {
+        stageEqCount_ = 0;
+        const double rate = static_cast<double>(sampleRate_);
+        for (int index = 0; index < hrir::kStageEqCount && stageEqCount_ < kMaxStageEq; ++index)
+        {
+            const double type = static_cast<double>(hrir::kStageEq[index][0]);
+            const double frequency = static_cast<double>(hrir::kStageEq[index][1]);
+            const double q = static_cast<double>(hrir::kStageEq[index][2]);
+            const double gainDb = static_cast<double>(hrir::kStageEq[index][3]);
+            if (!(frequency > 0.0 && frequency < 0.45 * rate && q > 0.0 && std::abs(gainDb) <= 24.0))
+            {
+                continue;
+            }
+
+            const double a = std::pow(10.0, gainDb / 40.0);
+            const double w0 = 2.0 * kPiDouble * frequency / rate;
+            const double cosine = std::cos(w0);
+            const double alpha = std::sin(w0) / (2.0 * q);
+            double b0 = 1.0;
+            double b1 = 0.0;
+            double b2 = 0.0;
+            double a0 = 1.0;
+            double a1 = 0.0;
+            double a2 = 0.0;
+            if (type < 0.5)
+            {
+                // Low shelf.
+                const double root = 2.0 * std::sqrt(a) * alpha;
+                b0 = a * ((a + 1.0) - (a - 1.0) * cosine + root);
+                b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosine);
+                b2 = a * ((a + 1.0) - (a - 1.0) * cosine - root);
+                a0 = (a + 1.0) + (a - 1.0) * cosine + root;
+                a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosine);
+                a2 = (a + 1.0) + (a - 1.0) * cosine - root;
+            }
+            else
+            {
+                // Peaking.
+                b0 = 1.0 + alpha * a;
+                b1 = -2.0 * cosine;
+                b2 = 1.0 - alpha * a;
+                a0 = 1.0 + alpha / a;
+                a1 = -2.0 * cosine;
+                a2 = 1.0 - alpha / a;
+            }
+
+            Biquad& biquad = stageEq_[stageEqCount_];
+            biquad.b0 = b0 / a0;
+            biquad.b1 = b1 / a0;
+            biquad.b2 = b2 / a0;
+            biquad.a1 = a1 / a0;
+            biquad.a2 = a2 / a0;
+            ++stageEqCount_;
+        }
+    }
+
     // y[n] = sum_k h[k] x[n - wholeDelay - k], read straight from the input
     // history (masked, so it cannot leave the buffer; the window is at most
     // kMaxOnsetDelaySamples + kMaxDeviceTaps samples, checked at compile time).
@@ -891,6 +1112,7 @@ private:
             kernelTable_[index] = static_cast<float>(cutoff / ratio * sinc * window);
         }
 
+        ConfigureStageEq();
         const int fadeStart = wanted > kMaxDeviceTaps ? kMaxDeviceTaps - kMaxDeviceTaps / 8 : kMaxDeviceTaps;
         for (int tap = 0; tap < kMaxDeviceTaps; ++tap)
         {
@@ -1009,9 +1231,18 @@ private:
 
     bool RenderStateIsFinite() const
     {
-        // The HRIR path keeps no recursive state: its input history is
-        // sanitised on write and its coefficients come from the fixed table.
+        // The HRIR convolution keeps no recursive state (its input history is
+        // sanitised on write); the stage EQ and the classic low-passes do.
         bool finite = IsFinite(roomInputBass_);
+        for (const float value : leftLowPass_) finite = finite && IsFinite(value);
+        for (const float value : rightLowPass_) finite = finite && IsFinite(value);
+        for (const auto& ear : eqState_)
+        {
+            for (const auto& filter : ear)
+            {
+                finite = finite && std::isfinite(filter[0]) && std::isfinite(filter[1]);
+            }
+        }
         for (const float value : earlyRoomLowPass_) finite = finite && IsFinite(value);
         for (const float value : earlyRoomBass_) finite = finite && IsFinite(value);
         for (const float value : roomDamping_) finite = finite && IsFinite(value);
@@ -1124,6 +1355,15 @@ private:
 
     void ResetFilterState()
     {
+        leftLowPass_.fill(0.0f);
+        rightLowPass_.fill(0.0f);
+        for (auto& ear : eqState_)
+        {
+            for (auto& filter : ear)
+            {
+                filter.fill(0.0);
+            }
+        }
         earlyRoomLowPass_.fill(0.0f);
         earlyRoomBass_.fill(0.0f);
         roomDamping_.fill(0.0f);
@@ -1139,6 +1379,8 @@ private:
         ResetFilterState();
         roomIndex_.fill(0);
         filtersPrimed_ = false;
+        parametersPrimed_ = false;
+        rendererPrimed_ = false;
     }
 
     void ResetDsp()
@@ -1168,7 +1410,17 @@ private:
     float mix_ = 0.0f;
     bool wasBypassed_ = true;
     bool filtersPrimed_ = false;
+    bool parametersPrimed_ = false;
+    bool rendererPrimed_ = false;
+    ssap3::Renderer activeRenderer_ = ssap3::Renderer::Measured;
     Quaternion orientation_{};
+    RenderParameters leftParameters_{};
+    RenderParameters rightParameters_{};
+    std::array<float, 2> leftLowPass_{};
+    std::array<float, 2> rightLowPass_{};
+    std::array<Biquad, kMaxStageEq> stageEq_{};
+    int stageEqCount_ = 0;
+    std::array<std::array<std::array<double, 2>, kMaxStageEq>, 2> eqState_{}; // [ear][biquad][z1, z2]
     std::array<FilterBank, 2> banks_{};
     int activeBank_ = 0;
     std::array<Direction, 2> filterDirections_{};

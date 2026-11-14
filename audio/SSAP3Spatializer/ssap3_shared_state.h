@@ -51,6 +51,15 @@ enum class TrackingState : std::int32_t
     Lost = 3,
 };
 
+// Direct-path renderer. Occupies what was reserved0: writers before engine
+// 2.7.0 wrote 0 there, which selects the measured renderer, so the v2 layout
+// and older writers stay compatible. Any other value rejects the record.
+enum class Renderer : std::int32_t
+{
+    Measured = 0, // MIT KEMAR HRIR convolution with the stage timbre correction
+    Classic = 1,  // the parametric model of engine 2.5 (ITD, level, head-shadow low-pass)
+};
+
 struct SharedStateV2
 {
     std::uint32_t magic;
@@ -58,7 +67,7 @@ struct SharedStateV2
     volatile long sequence;
     std::int32_t mode;
     std::int32_t trackingState;
-    std::int32_t reserved0;
+    std::int32_t renderer;
     float orientation[4];
     float yawDegrees;
     float pitchDegrees;
@@ -77,6 +86,7 @@ static_assert(sizeof(long) == 4, "LONG must be 32-bit (Windows LLP64).");
 static_assert(offsetof(SharedStateV2, sequence) == 8);
 static_assert(offsetof(SharedStateV2, mode) == 12);
 static_assert(offsetof(SharedStateV2, trackingState) == 16);
+static_assert(offsetof(SharedStateV2, renderer) == 20);
 static_assert(offsetof(SharedStateV2, orientation) == 24);
 static_assert(offsetof(SharedStateV2, yawDegrees) == 40);
 static_assert(offsetof(SharedStateV2, writerTickMs) == 56);

@@ -14,6 +14,7 @@ public class SharedStateLayoutTests
         Assert.Equal(8, SharedStateLayout.SequenceOffset);
         Assert.Equal(12, SharedStateLayout.ModeOffset);
         Assert.Equal(16, SharedStateLayout.TrackingStateOffset);
+        Assert.Equal(20, SharedStateLayout.RendererOffset);
         Assert.Equal(24, SharedStateLayout.OrientationOffset);
         Assert.Equal(40, SharedStateLayout.YawOffset);
         Assert.Equal(56, SharedStateLayout.WriterTickOffset);
@@ -58,6 +59,33 @@ public class SharedStateLayoutTests
         Assert.Equal(SoundstageSettings.MaxSpeakerDistance, state.Stage.SpeakerDistanceMeters);
         Assert.Equal(0f, state.Stage.RoomMix);
         Assert.Equal(1f, state.Stage.Intensity);
+    }
+
+    [Theory]
+    [InlineData(SpatialRenderer.Measured, 0)]
+    [InlineData(SpatialRenderer.Classic, 1)]
+    public void Renderer_round_trips_at_offset_20(SpatialRenderer renderer, int wireValue)
+    {
+        var record = new byte[SharedStateLayout.RecordSize];
+        var stage = new SoundstageSettings { Renderer = renderer };
+        SharedStateLayout.WritePayload(record, new SpatialEngineState(SpatialEngineMode.Fixed, TrackingState.None, Quaternion.Identity, stage), 1);
+
+        Assert.Equal(wireValue, BinaryPrimitives.ReadInt32LittleEndian(record.AsSpan(SharedStateLayout.RendererOffset)));
+        Assert.True(SharedStateLayout.TryRead(record, out var state, out _));
+        Assert.Equal(renderer, state.Stage.Renderer);
+    }
+
+    [Fact]
+    public void Undefined_renderers_are_sanitised_and_rejected()
+    {
+        // The default (and settings saved before the renderer existed) is Measured.
+        Assert.Equal(SpatialRenderer.Measured, SoundstageSettings.Default.Renderer);
+        Assert.Equal(SpatialRenderer.Measured, new SoundstageSettings { Renderer = (SpatialRenderer)7 }.Sanitized().Renderer);
+
+        var record = new byte[SharedStateLayout.RecordSize];
+        SharedStateLayout.WritePayload(record, new SpatialEngineState(SpatialEngineMode.Fixed, TrackingState.None, Quaternion.Identity, SoundstageSettings.Default), 1);
+        BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(SharedStateLayout.RendererOffset), 2);
+        Assert.False(SharedStateLayout.TryRead(record, out _, out _));
     }
 
     [Fact]

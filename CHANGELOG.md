@@ -2,6 +2,25 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Spatial engine 2.7.0: timbre correction and a renderer choice**, after a
+  listening test of 2.6.0. On AirPods Pro 3, the measured renderer sounded
+  thin, harsh or muffled, and spatially wrong. Measurement confirmed it:
+  - the ±30° stage was 6–9 dB down below 100 Hz, a measurement artifact of
+    128-tap HRIRs;
+  - it was 3–10 dB off around 1.3, 4 and 8 kHz.
+
+  Changes:
+  - A fitted 6-biquad stage EQ now flattens the stage to within about ±1 dB
+    (the 8 kHz notch is filled only partly). It applies to both ears alike,
+    so the ITD is unchanged.
+  - The trim is now 0.35, which keeps the bass headroom of the classic
+    renderer.
+  - **Settings → Soundstage → Renderer**: Measured or Classic (the earlier
+    parametric model), switchable without clicks.
+  - The choice uses the shared record's formerly reserved field. Older
+    writers' 0 means Measured; any other value is rejected.
+  - New tests cover tonal balance, the classic renderer, invalid renderer
+    values and renderer-switch clicks.
 - **Measured-HRTF soundstage** (`docs/TECHNICAL_REPORT.md` §5). The spatial
   engine (version 2.6.0) convolves each virtual speaker with measured
   head-related impulse responses (MIT KEMAR, credited in `THIRD_PARTY.md`)

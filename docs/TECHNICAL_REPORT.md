@@ -13,7 +13,7 @@ what is **blocked**. Simulated results are never reported as real tracking.
 | Tracked mode, AirPods sensors over SSAP3's driver | **Implemented, blocked on Microsoft signing.** The driver package is submission-ready (`driver/SIGNING.md`). The motion decoder follows the published protocol but is unverified on AirPods Pro 3. |
 | Tracked mode, companion device | **Implemented on Windows** (authenticated, encrypted, tested over loopback). No real companion app exists yet. One hardware question is open (§3.3). |
 | Pitch and roll | **Implemented** with a guided nod calibration. Tested with simulated mountings. |
-| HRTF rendering | **Measured-HRIR convolution** (MIT KEMAR dummy head), interpolated across 710 directions and crossfaded on every update, plus a compact room. It renders full 3-D head orientation. Tested in CI (§5). **Not yet heard on AirPods:** the new engine build must be reinstalled first. SOFA import is not implemented. |
+| HRTF rendering | Two renderers, switchable while listening (§5.5):<br>- **Measured:** HRIR convolution (MIT KEMAR dummy head), interpolated across 710 directions, crossfaded on every update and timbre-corrected;<br>- **Classic:** the earlier parametric model.<br>Both add a compact room and render full 3-D head orientation. The first listening test of the uncorrected measured renderer (engine 2.6.0) was negative (thin, harsh or muffled, wrong space). Engine 2.7.0 adds the timbre correction and the switch, and **has not been heard yet**. SOFA import is not implemented. |
 
 ## 2. Motion access on Windows (measured on the development PC)
 
@@ -98,10 +98,11 @@ predictor is worth adding.
 ## 5. Spatial audio engine
 
 The renderer rotates the two virtual speakers into the head frame with the
-full head quaternion (yaw, pitch, roll). It convolves each speaker with
-**measured head-related impulse responses** for its head-relative direction,
-then adds early reflections and a short late room. This replaces the earlier
-parametric model (ITD, level and low-pass approximations).
+full head quaternion (yaw, pitch, roll). The measured renderer convolves each
+speaker with **measured head-related impulse responses** for its
+head-relative direction and applies a fitted stage timbre correction. Early
+reflections and a short late room follow. The earlier parametric model (ITD,
+level and low-pass approximations) remains selectable as **Classic** (§5.5).
 
 ### 5.1 Dataset and offline conversion
 
@@ -151,12 +152,33 @@ parametric model (ITD, level and low-pass approximations).
    output crossfades linearly from the old filters to the new ones. Head
    turns, recentring glides and stage changes therefore never step the
    output.
-5. **Level.** A fixed trim of 0.40 keeps the replaced renderer's loudness
-   and low-frequency headroom. At ±30° it gives a coherent near+far gain of
-   0.83 at 500 Hz (previously 0.82) and a white-noise power of 0.36 per ear
-   (previously 0.37). Distance gain, room, intensity, the 25 ms mode
-   crossfade, input sanitising, the output limiter and the bit-exact Off
-   path are unchanged.
+5. **Timbre correction (engine 2.7.0).** The offline builder fits six biquads
+   (a low shelf at 133 Hz, +8.8 dB, and five peaking filters) to the ±30°
+   stage's power response. See `tools/hrtf/README.md` for the fitting rules.
+   - The engine designs the biquads at the device rate and runs them in
+     double precision on the measured direct path, alike for both ears.
+   - ITD is unchanged, and ILD changes by at most 0.2 dB at 0–90°
+     (0.9 dB at 150°).
+
+   | Band | Before correction | After |
+   | --- | --- | --- |
+   | 20–100 Hz | -9 to -6 dB | within ±0.5 dB |
+   | 1.3 kHz | -2.9 dB | +0.1 dB |
+   | 2 kHz | +2.0 dB | +1.8 dB |
+   | 4 kHz | +2.6 dB | +0.2 dB |
+   | 8 kHz | -9.9 dB (pinna notch) | -3.8 dB (filled only partly on purpose) |
+
+   Values are relative to the 200 Hz – 8 kHz mean, smoothed to 1/3 octave.
+
+   The bass loss is a measurement artifact, not a head effect: the
+   diffuse-field average of all 710 directions is flat to ±0.3 dB from
+   300 Hz to 15 kHz but falls 9 dB by 20 Hz, because 128-tap responses
+   cannot hold low frequencies.
+6. **Level.** The measured renderer's trim is 0.35. That gives centred
+   (mono) bass at ±30° a peak gain of 0.84 after the bass is restored, the
+   same headroom as the classic renderer (0.82). Distance gain, room,
+   intensity, the 25 ms mode crossfade, input sanitising, the output limiter
+   and the bit-exact Off path are unchanged.
 
 Cost at 48 kHz: four 106-tap FIRs per sample (eight during a crossfade),
 SSE, plus about 10 000 multiply-adds per filter rebuild.
@@ -184,6 +206,11 @@ difference (ITD, onset at 15 % of peak) of the rendered responses, at
   - -90°: ILD -14.86 dB, ITD -0.688 ms;
   - front/back: 4.93 dB.
 - CI asserts ranges around these values.
+- These are engine 2.6.0 values. The 2.7.0 timbre correction:
+  - leaves the ITD unchanged;
+  - moves the ILD by at most 0.2 dB (0.9 dB at 150°);
+  - lowers the front/back difference to about 3.8 dB, because the 8 kHz
+    notch is partly filled (design check).
 
 | Head-relative direction | ILD | ITD (right ear leads) |
 | --- | --- | --- |
@@ -218,8 +245,33 @@ difference (ITD, onset at 15 % of peak) of the rendered responses, at
 - **SOFA import is not implemented.** A different dataset needs the offline
   converter extended. Any SOFA/HDF5 parser belongs there (ADR-5), never in
   the engine.
-- **Not yet heard on AirPods.** The installed engine on the development PC is
-  still the parametric build until the new DLL is installed.
+- **The timbre correction fits one stage.** It is fitted to the default ±30°
+  stage at 0° elevation with the head forward. Other stage widths and head
+  turns keep their own colouration, as real speakers do.
+- **Listening results.** Engine 2.6.0 (measured, uncorrected) was heard on
+  AirPods Pro 3 on 2026-11-14. The user found it worse than the classic
+  renderer:
+  - thinner bass;
+  - harsh or muffled tone;
+  - space that felt wrong.
+
+  The first two match the measured deviations in step 5 above. Engine 2.7.0
+  has not been heard yet. Spatial impressions from a generic head vary from
+  person to person, which is why the classic renderer stays one click away
+  (§5.5).
+
+### 5.5 Renderer choice
+
+Settings → Soundstage → **Renderer**: *Measured* (the default) or *Classic*.
+
+- **How it is sent:** the app writes the choice into the shared record at
+  offset 20, previously reserved. Older apps wrote 0 there, which means
+  Measured, so the v2 layout is unchanged. The engine rejects the whole
+  record for any other value.
+- **No clicks when switching:** both renderers run every sample, so the
+  newly selected one has no cold start. A change crossfades over one audio
+  block. CI checks this with a measured → classic → measured switch.
+- **Cost:** the CI real-time test runs with both renderers active (§5.2).
 
 ## 6. Security
 

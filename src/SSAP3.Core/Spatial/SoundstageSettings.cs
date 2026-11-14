@@ -1,6 +1,19 @@
 namespace SSAP3.Core.Spatial;
 
 /// <summary>
+/// The engine's direct-path renderer (shared state v2, offset 20). Values
+/// must match <c>ssap3::Renderer</c> in audio/SSAP3Spatializer/ssap3_shared_state.h.
+/// </summary>
+public enum SpatialRenderer
+{
+    /// <summary>Measured dummy-head HRTFs (MIT KEMAR) with the stage timbre correction.</summary>
+    Measured = 0,
+
+    /// <summary>The earlier parametric model (time and level differences, head-shadow filter).</summary>
+    Classic = 1,
+}
+
+/// <summary>
 /// User-configurable virtual soundstage. Ranges match the validation in the
 /// SSAP3 Spatial Engine (audio/SSAP3Spatializer/ssap3_shared_state.h); values
 /// outside them would make the engine reject the whole state record.
@@ -29,6 +42,9 @@ public sealed record SoundstageSettings
     /// <summary>Spatial rendering strength, 0 (pass-through) to 1.</summary>
     public float Intensity { get; init; } = 1.0f;
 
+    /// <summary>Direct-path renderer; settings saved before it existed load as <see cref="SpatialRenderer.Measured"/>.</summary>
+    public SpatialRenderer Renderer { get; init; } = SpatialRenderer.Measured;
+
     /// <summary>Returns a copy with every value clamped into its valid range; NaN becomes the default.</summary>
     public SoundstageSettings Sanitized() => new()
     {
@@ -37,6 +53,7 @@ public sealed record SoundstageSettings
         SpeakerElevationDegrees = Clamp(SpeakerElevationDegrees, MinSpeakerElevation, MaxSpeakerElevation, 0f),
         RoomMix = Clamp(RoomMix, 0f, 1f, 1f),
         Intensity = Clamp(Intensity, 0f, 1f, 1f),
+        Renderer = Enum.IsDefined(Renderer) ? Renderer : SpatialRenderer.Measured,
     };
 
     private static float Clamp(float value, float minimum, float maximum, float fallback) =>

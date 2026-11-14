@@ -39,6 +39,9 @@ public static class SharedStateLayout
     public const int SequenceOffset = 8;
     public const int ModeOffset = 12;
     public const int TrackingStateOffset = 16;
+
+    /// <summary>Was reserved (always 0, which is <see cref="SpatialRenderer.Measured"/>).</summary>
+    public const int RendererOffset = 20;
     public const int OrientationOffset = 24;
     public const int YawOffset = 40;
     public const int PitchOffset = 44;
@@ -71,7 +74,7 @@ public static class SharedStateLayout
         BinaryPrimitives.WriteUInt32LittleEndian(record[VersionOffset..], Version);
         BinaryPrimitives.WriteInt32LittleEndian(record[ModeOffset..], (int)mode);
         BinaryPrimitives.WriteInt32LittleEndian(record[TrackingStateOffset..], (int)tracking);
-        BinaryPrimitives.WriteInt32LittleEndian(record[20..], 0);
+        BinaryPrimitives.WriteInt32LittleEndian(record[RendererOffset..], (int)stage.Renderer);
         BinaryPrimitives.WriteSingleLittleEndian(record[OrientationOffset..], orientation.W);
         BinaryPrimitives.WriteSingleLittleEndian(record[(OrientationOffset + 4)..], orientation.X);
         BinaryPrimitives.WriteSingleLittleEndian(record[(OrientationOffset + 8)..], orientation.Y);
@@ -103,7 +106,8 @@ public static class SharedStateLayout
 
         var mode = (SpatialEngineMode)BinaryPrimitives.ReadInt32LittleEndian(record[ModeOffset..]);
         var tracking = (TrackingState)BinaryPrimitives.ReadInt32LittleEndian(record[TrackingStateOffset..]);
-        if (!Enum.IsDefined(mode) || !Enum.IsDefined(tracking))
+        var renderer = (SpatialRenderer)BinaryPrimitives.ReadInt32LittleEndian(record[RendererOffset..]);
+        if (!Enum.IsDefined(mode) || !Enum.IsDefined(tracking) || !Enum.IsDefined(renderer))
         {
             return false;
         }
@@ -120,6 +124,7 @@ public static class SharedStateLayout
             RoomMix = BinaryPrimitives.ReadSingleLittleEndian(record[RoomMixOffset..]),
             Intensity = BinaryPrimitives.ReadSingleLittleEndian(record[IntensityOffset..]),
             SpeakerElevationDegrees = BinaryPrimitives.ReadSingleLittleEndian(record[SpeakerElevationOffset..]),
+            Renderer = renderer,
         };
         writerTickMs = BinaryPrimitives.ReadUInt64LittleEndian(record[WriterTickOffset..]);
         state = new SpatialEngineState(mode, tracking, orientation, stage);

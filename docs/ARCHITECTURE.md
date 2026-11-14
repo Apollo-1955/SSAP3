@@ -76,8 +76,12 @@ check it.
 - Rotates each world-fixed virtual speaker into the head frame and convolves
   it with measured HRIRs (MIT KEMAR). The four nearest measurements are
   blended onset-aligned and resampled to the device rate with a band-limited
-  kernel that also applies the sub-sample ITD. Early reflections and a
-  4-line FDN room follow. Details: `docs/TECHNICAL_REPORT.md` §5.
+  kernel that also applies the sub-sample ITD. A fitted stage EQ then
+  corrects the timbre, alike for both ears. Early reflections and a 4-line
+  FDN room follow.
+- The classic parametric renderer can be selected instead (shared record,
+  offset 20). Both renderers run continuously, and a switch crossfades.
+  Details: `docs/TECHNICAL_REPORT.md` §5.
 - Filter updates crossfade within the block, and mode switches crossfade
   over 25 ms. Off is bit-exact. Non-finite input is sanitised and the output
   is limited.

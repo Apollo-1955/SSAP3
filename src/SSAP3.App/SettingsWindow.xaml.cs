@@ -87,6 +87,8 @@ public partial class SettingsWindow : Window
         ElevationSlider.Value = stage.SpeakerElevationDegrees;
         RoomSlider.Value = stage.RoomMix;
         IntensitySlider.Value = stage.Intensity;
+        RendererMeasuredRadio.IsChecked = stage.Renderer == SpatialRenderer.Measured;
+        RendererClassicRadio.IsChecked = stage.Renderer == SpatialRenderer.Classic;
         HeadTrackingCheck.IsChecked = settings.HeadTrackingEnabled;
         DriftCheck.IsChecked = settings.DriftCorrection;
         InvertYawCheck.IsChecked = settings.InvertYaw;
@@ -104,7 +106,11 @@ public partial class SettingsWindow : Window
         DrawRoom(0);
     }
 
-    private void StageSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private void StageSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyStageFromControls();
+
+    private void Renderer_OnChanged(object sender, RoutedEventArgs e) => ApplyStageFromControls();
+
+    private void ApplyStageFromControls()
     {
         if (_loading)
         {
@@ -118,6 +124,7 @@ public partial class SettingsWindow : Window
             SpeakerElevationDegrees = (float)ElevationSlider.Value,
             RoomMix = (float)RoomSlider.Value,
             Intensity = (float)IntensitySlider.Value,
+            Renderer = RendererClassicRadio.IsChecked == true ? SpatialRenderer.Classic : SpatialRenderer.Measured,
         }.Sanitized();
         _owner.ApplySettings();
         UpdateLabels();
