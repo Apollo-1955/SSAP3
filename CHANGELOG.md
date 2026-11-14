@@ -2,6 +2,30 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Temporary development driver signing** (`tools/dev/Ssap3DevSigning.ps1`,
+  `tools/dev/README.md`). For a dedicated development PC only, so that the
+  driver and real head tracking can be tested before Microsoft signs it.
+  - The certificate is generated locally: `CN=SSAP3 Temporary Driver
+    Signing`, RSA 3072/SHA-256, a non-exportable key, code signing only, not
+    a CA, valid 1–90 days.
+  - Commands cover the whole lifecycle: GenerateCertificate,
+    InstallCertificate, SignDriver, VerifySignature, CheckCertificate,
+    RenewCertificate, RemoveCertificate, Enable/DisableTestSigning,
+    InstallDriver, RemoveDriver, Report and WatchTracking.
+  - Statuses are reported separately: cryptographically signed, locally
+    trusted, accepted under test signing, and Microsoft-signed (never, for
+    this package).
+  - The tool refuses while Secure Boot is on, which Windows requires for
+    test mode. It never changes firmware, Memory Integrity, Defender or Code
+    Integrity policy, and touches only its own certificates, packages and
+    test-signing change.
+  - SSAP3 Setup still refuses the package. The production path is unchanged.
+  - CI rehearses the full lifecycle on a throwaway runner certificate
+    (`tools/dev/Test-DevSigning.ps1`). It also checks that published driver
+    artifacts stay unsigned, and that production setup never references the
+    tool.
+  - `driver\package-driver.ps1` no longer test-signs, and
+    `tools\dev\New-DevTestCertificate.ps1` is replaced.
 - **Driver signing readiness** (`driver/SIGNING.md`,
   `docs/DRIVER_TEST_REPORT.md`). Microsoft's signature itself still needs
   the maintainer's organization, EV certificate and Partner Center account.

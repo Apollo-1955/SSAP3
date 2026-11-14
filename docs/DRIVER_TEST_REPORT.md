@@ -26,6 +26,8 @@ design.
 | Attestation submission CAB in the required layout | Done (CI artifact `ssap3-driver-attestation-cab-unsigned`) |
 | EV signing helper | Done (`driver/Sign-AttestationCab.ps1`; rehearsed in CI with a throwaway certificate) |
 | Signature, integrity and identity verification | Done (`installer/Test-Ssap3Driver.ps1` and Setup's rule; tested on real catalogs and in CI) |
+| Temporary development signing for a dedicated development PC (`tools/dev/Ssap3DevSigning.ps1`; Test F) | Done (this PC: read-only checks and the certificate round trip; CI: the full lifecycle) |
+| Loading the development-signed driver in test mode; real head tracking | **Not yet:** needs a development PC with Secure Boot turned off by its owner. Blocked on this PC by Secure Boot, by design |
 | Organization, EV certificate, Partner Center account | **Maintainer** |
 | Signing the CAB with the EV certificate; submitting; downloading Microsoft's package | **Maintainer + Microsoft** |
 | Loading the signed driver; Driver Verifier; head tracking on AirPods Pro 3 | **Not yet** (needs the signed package) |
@@ -84,6 +86,23 @@ design.
 | Classic renderer unchanged; switching is click-free | CI | spatial-engine tests pass |
 | Tracked mode follows real head movement | not yet | needs the signed driver |
 | No dropouts or crackling | PC | none reported in listening (subjective); CI click tests pass |
+
+## Test F: temporary development signing
+
+The development signature is a local test signature. **It is not a Microsoft
+signature**, and SSAP3 Setup refuses it. It loads only in Windows test mode,
+which Windows allows only with Secure Boot off.
+
+| Check | Where | Result |
+| --- | --- | --- |
+| Readiness (`CheckSystem`) | PC | Secure Boot on, Memory Integrity running, Defender on, test mode off. `EnableTestSigning`, `InstallCertificate` and `InstallDriver` are **blocked by Secure Boot**, with that explanation; nothing was changed. **This PC cannot load a development-signed driver**, by design |
+| `InstallDriver -DevelopmentMachine` on this PC | PC | refused (Secure Boot, not elevated, test mode not active); nothing created |
+| Certificate profile | PC | `CN=SSAP3 Temporary Driver Signing`, sha256RSA, RSA 3072, key non-exportable (PFX export refused: "Key not valid for use in specified state"), code signing only, not a CA, 30 days, SSAP3 marker |
+| Reuse, removal, look-alike | PC | Generating again reused the same certificate. Removal deleted the certificate and its key file: the user store and the key folder matched their earlier state. A certificate with the same subject but no marker was left alone |
+| Marker encoding | PC | A custom UUID OID (arc 2.25) was tried first; CryptoAPI cannot encode its 128-bit arc. The marker now uses the standard comment extension |
+| `Report`, `WatchTracking` | PC | Driver `NotInstalled`. The watcher read 27 head-pose samples from the installed SSAP3 (Fixed mode) and reported "Not tracking", correctly |
+| Signing, trust, driver store, renewal and removal on the real package | CI | see below |
+| Driver loads in test mode; Tracked mode follows real head movement | not yet | needs a development PC (`tools/dev/README.md`) |
 
 ## CI results (run #29, commit `b6a2acc`, all jobs green)
 

@@ -64,6 +64,161 @@ function Get-FailedCheck($Result, [string]$Name) {
     return [bool]($Result.Checks | Where-Object { $_.Check -eq $Name -and -not $_.Ok })
 }
 
+# A root-enumerated test device with the driver's generic AAP hardware ID (as
+# devcon install does), so the kernel loads the driver without Bluetooth
+# hardware. The driver finds no Bluetooth profile interface and records that;
+# its control interface still starts. CI only.
+$script:RootDevice = $null
+$script:NativeSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class Ssap3DevCiNative
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid; public int DevInst; public IntPtr Reserved; }
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetINFClassW(string infName, out Guid classGuid, StringBuilder className, int classNameSize, out int requiredSize);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid classGuid, IntPtr hwndParent);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiCreateDeviceInfoW(IntPtr set, string deviceName, ref Guid classGuid, string description, IntPtr hwndParent, int flags, ref SP_DEVINFO_DATA data);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr set, ref SP_DEVINFO_DATA data, int property, byte[] buffer, int size);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiCallClassInstaller(int function, IntPtr set, ref SP_DEVINFO_DATA data);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDeviceInstanceIdW(IntPtr set, ref SP_DEVINFO_DATA data, StringBuilder id, int size, out int required);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwnd, string hardwareId, string infPath, int flags, out bool reboot);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_List_SizeW(out uint size, ref Guid guid, string deviceId, uint flags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_ListW(ref Guid guid, string deviceId, char[] buffer, uint length, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(IntPtr device, uint code, byte[] input, uint inputSize, byte[] output, uint outputSize, out uint returned, IntPtr overlapped);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+
+    // Registers ROOT\<class>\nnnn with one hardware ID; returns its instance ID.
+    public static string CreateRootDevice(string infPath, string hardwareId, out int error)
+    {
+        error = 0;
+        Guid classGuid; var className = new StringBuilder(64); int required;
+        if (!SetupDiGetINFClassW(infPath, out classGuid, className, className.Capacity, out required)) { error = Marshal.GetLastWin32Error(); return null; }
+        IntPtr set = SetupDiCreateDeviceInfoList(ref classGuid, IntPtr.Zero);
+        if (set == new IntPtr(-1)) { error = Marshal.GetLastWin32Error(); return null; }
+        try
+        {
+            var data = new SP_DEVINFO_DATA(); data.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+            if (!SetupDiCreateDeviceInfoW(set, className.ToString(), ref classGuid, null, IntPtr.Zero, 1, ref data)) { error = Marshal.GetLastWin32Error(); return null; }
+            var ids = Encoding.Unicode.GetBytes(hardwareId + "\0\0");
+            if (!SetupDiSetDeviceRegistryPropertyW(set, ref data, 1, ids, ids.Length)) { error = Marshal.GetLastWin32Error(); return null; }
+            if (!SetupDiCallClassInstaller(0x19, set, ref data)) { error = Marshal.GetLastWin32Error(); return null; }
+            var id = new StringBuilder(256);
+            if (!SetupDiGetDeviceInstanceIdW(set, ref data, id, id.Capacity, out required)) { error = Marshal.GetLastWin32Error(); return null; }
+            return id.ToString();
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+
+    public static int InstallDriver(string infPath, string hardwareId)
+    {
+        bool reboot;
+        // INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE
+        return UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hardwareId, infPath, 0x5, out reboot) ? 0 : Marshal.GetLastWin32Error();
+    }
+
+    public static string[] Interfaces(Guid guid)
+    {
+        uint size;
+        if (CM_Get_Device_Interface_List_SizeW(out size, ref guid, null, 0) != 0 || size <= 1) return new string[0];
+        var buffer = new char[size];
+        if (CM_Get_Device_Interface_ListW(ref guid, null, buffer, size, 0) != 0) return new string[0];
+        return new string(buffer).Split(new[] { '\0' }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    // Returns 0 on success, the Win32 error otherwise; -error if the open failed.
+    public static int Ioctl(string path, uint access, uint code, int inputSize, int outputSize, out byte[] output)
+    {
+        output = null;
+        var handle = CreateFileW(path, access, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return -Marshal.GetLastWin32Error();
+        try
+        {
+            var buffer = new byte[outputSize];
+            uint returned;
+            if (!DeviceIoControl(handle, code, inputSize > 0 ? new byte[inputSize] : null, (uint)inputSize, buffer, (uint)outputSize, out returned, IntPtr.Zero)) return Marshal.GetLastWin32Error();
+            output = buffer;
+            return 0;
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+
+function Test-KernelLoad([string]$Inf) {
+    if (-not ('Ssap3DevCiNative' -as [type])) { Add-Type -TypeDefinition $script:NativeSource }
+    $hardwareId = 'BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}'
+    $code = 0
+    $instance = [Ssap3DevCiNative]::CreateRootDevice($Inf, $hardwareId, [ref]$code)
+    Check ($null -ne $instance) "a root-enumerated test device is registered (Win32 error $code)"
+    if ($null -eq $instance) { return }
+    $script:RootDevice = $instance
+    $install = [Ssap3DevCiNative]::InstallDriver($Inf, $hardwareId)
+    Write-Output "INFO  UpdateDriverForPlugAndPlayDevices: Win32 result $install"
+    $device = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $device = Get-PnpDevice -InstanceId $instance -ErrorAction SilentlyContinue
+    } while ((Get-Date) -lt $deadline -and ($null -eq $device -or $device.Status -ne 'OK'))
+    $problem = if ($null -ne $device) { [int]$device.Problem } else { -1 }
+    Check ($null -ne $device -and $device.Status -eq 'OK' -and $problem -eq 0) "Windows loaded the development-signed driver under test signing and started the test device (status $(if ($device) { $device.Status } else { 'missing' }), problem code $problem)"
+    $service = Get-CimInstance Win32_SystemDriver -Filter "Name='ssap3aap'" -ErrorAction SilentlyContinue
+    Check ($null -ne $service -and $service.State -eq 'Running') "kernel service ssap3aap is running ($(if ($service) { $service.State } else { 'not registered' }))"
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-CodeIntegrity/Operational'; StartTime = (Get-Date).AddMinutes(-10) } -ErrorAction Stop | Where-Object { $_.Message -match 'ssap3aap' })
+        Write-Output "INFO  Code Integrity events about ssap3aap.sys: $($events.Count)$(if ($events.Count) { ' (IDs ' + (($events | ForEach-Object Id | Select-Object -Unique) -join ', ') + ')' })"
+    }
+    catch { Write-Output "INFO  Code Integrity log: $($_.Exception.Message)" }
+    if ($problem -ne 0) { return }
+
+    $health = Invoke-Ssap3DevNative 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repository 'installer\Test-Ssap3Driver.ps1'))
+    $health.Lines | Where-Object { $_ -match 'Installed\s+(Control interface|Device|Service)|reached' } | ForEach-Object { Write-Output "INFO  health check: $_" }
+    Check ([bool]($health.Lines | Where-Object { $_ -match '^Installed driver reached: Reachable' })) 'the production health check reaches Reachable (control interface answers, protocol v4)'
+
+    $paths = @([Ssap3DevCiNative]::Interfaces([Guid]'1C3A8128-3668-4428-95A4-B1CAD51B7249'))
+    Check ($paths.Count -ge 1) "the driver exposes its control interface ($($paths.Count))"
+    if ($paths.Count -eq 0) { return }
+    $path = $paths[0]
+    $read = [uint32]2147483648
+    $readWrite = [uint32]3221225472
+    $out = $null
+    $status = [Ssap3DevCiNative]::Ioctl($path, $read, 0x00226000, 0, 40, [ref]$out)
+    Check ($status -eq 0 -and [BitConverter]::ToUInt32($out, 4) -eq 4) "status query on a read-only handle: protocol v$(if ($out) { [BitConverter]::ToUInt32($out, 4) } else { '?' }) (Win32 $status)"
+    if ($status -eq 0) { Write-Output ("INFO  status: capabilities 0x{0:X}, inbound MTU {1}, last error {2}" -f [BitConverter]::ToUInt32($out, 8), [BitConverter]::ToUInt32($out, 12), [BitConverter]::ToUInt32($out, 16)) }
+    foreach ($ioctl in @(@('OPEN', 0x0022A004), @('CLOSE', 0x0022A008), @('SEND', 0x0022A00C))) {
+        $result = [Ssap3DevCiNative]::Ioctl($path, $read, [uint32]$ioctl[1], 0, 16, [ref]$out)
+        Check ($result -eq 5) "$($ioctl[0]) on a read-only handle is refused with access denied (Win32 $result)"
+    }
+    $open = [Ssap3DevCiNative]::Ioctl($path, $readWrite, 0x0022A004, 0, 16, [ref]$out)
+    Check ($open -ne 0 -and $open -ne 5) "OPEN with an empty request on a read-write handle is rejected as invalid (Win32 $open)"
+    $short = [Ssap3DevCiNative]::Ioctl($path, $readWrite, 0x00226010, 0, 16, [ref]$out)
+    Check ($short -ne 0) "READ with a 16-byte buffer (not 2582) is rejected (Win32 $short)"
+    $again = [Ssap3DevCiNative]::Ioctl($path, $read, 0x00226000, 0, 40, [ref]$out)
+    Check ($again -eq 0) 'the device still answers after the rejected requests'
+
+    $report = @(Get-Ssap3DevReport)
+    $report | Where-Object { $_ -match '^\s+[1-4]\. |Devices:|Service:|Health check:' } | ForEach-Object { Write-Output "INFO  report: $($_.Trim())" }
+    Check ([bool]($report | Where-Object { $_ -match '3\. Accepted under test-signing policy: Yes' })) 'Report: accepted under the test-signing policy (the kernel loaded it)'
+    Check ([bool]($report | Where-Object { $_ -match '4\. Officially Microsoft-signed:\s+No' })) 'Report: not Microsoft-signed'
+}
+
 $elevated = Test-Ssap3DevElevated
 $before = Get-Snapshot
 try {
@@ -88,11 +243,17 @@ try {
     Check (@(Get-Ssap3DevBlockers -Readiness (With @{ TestSigningActive = $true }) -Action InstallDriver -DevelopmentMachine).Count -eq 0) 'driver install allowed in test mode on a development PC'
 
     $ready = Get-Ssap3DevReadiness
-    Write-Output "INFO  runner: elevated $($ready.Elevated), Secure Boot $($ready.SecureBoot), test signing active $($ready.TestSigningActive), configured $($ready.TestSigningConfigured), Memory Integrity $($ready.MemoryIntegrity)"
-    $refusal = $null
-    try { Install-Ssap3DevDriver -Package $Stage -DevelopmentMachine | Out-Null } catch { $refusal = $_.Exception.Message }
-    Check ($null -ne $refusal -and $refusal -match 'not active|Secure Boot') 'the real InstallDriver refuses on a PC that is not in test mode'
-    Check (@(Find-Ssap3DevCertificates).Count -eq 0) '... before creating any certificate'
+    $testMode = $ready.TestSigningActive -and $ready.Elevated
+    Write-Output "INFO  runner: elevated $($ready.Elevated), Secure Boot $($ready.SecureBoot), test signing active $($ready.TestSigningActive), configured $($ready.TestSigningConfigured), Memory Integrity $($ready.MemoryIntegrity), BitLocker $($ready.BitLocker)"
+    if (-not $ready.TestSigningActive) {
+        $refusal = $null
+        try { Install-Ssap3DevDriver -Package $Stage -DevelopmentMachine | Out-Null } catch { $refusal = $_.Exception.Message }
+        Check ($null -ne $refusal -and $refusal -match 'not active|Secure Boot') 'the real InstallDriver refuses on a PC that is not in test mode'
+        Check (@(Find-Ssap3DevCertificates).Count -eq 0) '... before creating any certificate'
+    }
+    else {
+        Write-Output 'INFO  this runner image already runs in test mode with Secure Boot off, so the real InstallDriver and a kernel load are tested below'
+    }
 
     # ------------------------------------------------------ 2. certificate
     $certificate = New-Ssap3DevCertificate -ValidityDays 30
@@ -193,18 +354,30 @@ try {
         try { Check (@(Get-Ssap3UntrustedWriters -Path $stage).Count -eq 0 -and (Test-Ssap3TrustedOwner -Path $stage)) 'the install staging folder is administrators-only' }
         finally { Remove-Item -LiteralPath $stage -Recurse -Force }
 
-        $packagesBefore = @(Get-Ssap3DevStorePackages | ForEach-Object { $_.Published })
-        $add = Invoke-Ssap3DevNative (Join-Path $env:SystemRoot 'System32\pnputil.exe') @('/add-driver', (Join-Path $signedDir 'ssap3aap.inf'))
-        $staged = @(Get-Ssap3DevStorePackages | Where-Object { $_.Published -notin $packagesBefore })
-        Write-Output "INFO  pnputil /add-driver without test mode: exit $($add.Exit); staged: $(if ($staged.Count) { ($staged | ForEach-Object { "$($_.Published) signer '$($_.Signer)'" }) -join ', ' } else { 'nothing' }); $(($add.Lines | Select-Object -Last 2) -join ' ')"
-        if ($staged.Count -gt 0) {
-            Check ($staged[0].Signer -eq 'SSAP3 Temporary Driver Signing') 'the driver store records the development signer'
-            $removed = Remove-Ssap3DevStorePackage -Published $staged[0].Published
-            Write-Output "INFO  $removed"
-            Check (-not (Get-Ssap3DevStorePackages | Where-Object { $_.Published -eq $staged[0].Published })) 'the development package is removed from the driver store'
+        if ($testMode) {
+            # ------------------ 5a. real InstallDriver, kernel load, RemoveDriver
+            $installLog = @(Install-Ssap3DevDriver -Package $Stage -DevelopmentMachine)
+            $installLog | ForEach-Object { Write-Output "INFO  InstallDriver: $_" }
+            $installed = @(Get-Ssap3DevStorePackages | Where-Object { $_.Signer -eq 'SSAP3 Temporary Driver Signing' })
+            Check ($installed.Count -eq 1) "InstallDriver puts the development package in the driver store ($(@($installed | ForEach-Object { $_.Published }) -join ', '))"
+            Check ([bool]($installLog | Where-Object { $_ -match '^Verified the admin-only copy' })) 'InstallDriver verifies the administrators-only copy before pnputil'
+            Check (@((Read-Ssap3DevState).drivers).Count -eq 1) 'InstallDriver records the package it added'
+            Test-KernelLoad -Inf (Join-Path (Read-Ssap3DevState).lastSigned.folder 'ssap3aap.inf')
+
+            $removalLog = @(Uninstall-Ssap3DevDriver)
+            $removalLog | ForEach-Object { Write-Output "INFO  RemoveDriver: $_" }
+            Check (@(Get-Ssap3DevStorePackages | Where-Object { $_.Signer -eq 'SSAP3 Temporary Driver Signing' }).Count -eq 0) 'RemoveDriver removes the development package, with the device still present'
+            $service = Get-CimInstance Win32_SystemDriver -Filter "Name='ssap3aap'" -ErrorAction SilentlyContinue
+            Check ($null -eq $service -or $service.State -ne 'Running') "the driver is unloaded (service ssap3aap: $(if ($null -eq $service) { 'gone' } else { $service.State }))"
+            if ($script:RootDevice) {
+                $gone = Invoke-Ssap3DevNative (Join-Path $env:SystemRoot 'System32\pnputil.exe') @('/remove-device', $script:RootDevice)
+                Check ($gone.Exit -eq 0 -or $gone.Exit -eq 3010) "the root-enumerated test device is removed (pnputil exit $($gone.Exit))"
+                if ($gone.Exit -eq 0 -or $gone.Exit -eq 3010) { $script:RootDevice = $null }
+            }
+            Write-Output "INFO  after removal: $(Remove-Ssap3DevServiceLeftover)"
         }
         else {
-            Write-Output 'SKIP  the runner did not stage the package (store checks need a development PC)'
+            Write-Output 'SKIP  InstallDriver and the kernel load need a PC in test mode'
         }
 
         $old = $certificate.Thumbprint
@@ -215,6 +388,32 @@ try {
     }
     else {
         Write-Output 'SKIP  machine trust, driver store and renewal with trust need an elevated runner'
+    }
+
+    # ------------------------------------- 5b. test-signing switch (CI only)
+    # Exercised only on a disposable GitHub runner whose gate allows it (Secure
+    # Boot off). The runner is never restarted, so a change never takes effect.
+    if ($elevated) {
+        $gate = @(Get-Ssap3DevBlockers -Readiness $ready -Action EnableTestSigning -DevelopmentMachine)
+        if ($ready.TestSigningConfigured -match '^(?i)(Yes|On|True)$') {
+            $message = Enable-Ssap3TestSigning -DevelopmentMachine
+            Check ($message -match 'already configured' -and $null -eq (Read-Ssap3DevState).testSigning) 'EnableTestSigning leaves a test-signing setting it did not make alone, and records no change'
+        }
+        elseif ($env:GITHUB_ACTIONS -eq 'true' -and $gate.Count -eq 0) {
+            $previous = $ready.TestSigningConfigured
+            Write-Output "INFO  $(Enable-Ssap3TestSigning -DevelopmentMachine)"
+            $enabled = (Get-Ssap3DevReadiness).TestSigningConfigured
+            Check ($enabled -eq 'Yes') "EnableTestSigning sets testsigning in {current} (was '$previous', now '$enabled'; the runner is never restarted)"
+            Check ($null -ne (Read-Ssap3DevState).testSigning) 'the change was recorded'
+            @(Disable-Ssap3TestSigning) | ForEach-Object { Write-Output "INFO  $_" }
+            $restored = (Get-Ssap3DevReadiness).TestSigningConfigured
+            Check ($restored -eq $previous) "DisableTestSigning restores the previous value ('$restored')"
+            Check ($null -eq (Read-Ssap3DevState).testSigning) '... and clears its record'
+        }
+        else {
+            Write-Output "SKIP  test-signing switch: $(if ($gate.Count) { $gate[0] } else { 'not a GitHub runner' })"
+        }
+        Check ([bool](@(Disable-Ssap3TestSigning) | Where-Object { $_ -match 'did not turn test signing on' })) 'DisableTestSigning leaves a setting that SSAP3 did not change'
     }
 
     # ---------------------------------------------------------- 6. removal
@@ -230,6 +429,17 @@ try {
     $ephemeral = New-Ssap3DevCertificate -ValidityDays 1
     $discarded = Invoke-Ssap3DevSignDriver -Package $Stage -OutputFolder (Join-Path $work 'discarded') -DiscardKey
     Check ($discarded.CryptographicallySigned -and $null -eq (Get-Ssap3DevActiveCertificate) -and -not (Test-Path "Cert:\CurrentUser\My\$($ephemeral.Thumbprint)")) 'with -DiscardKey the package is signed and the key is deleted'
+
+    if ($elevated) {
+        $uninstall = @(Uninstall-Ssap3DevDriver -RemoveCertificate -RestoreTestSigning)
+        $uninstall | ForEach-Object { Write-Output "INFO  RemoveDriver: $_" }
+        Check ([bool]($uninstall | Where-Object { $_ -match '^Verified: no development-signed SSAP3 driver package' })) 'RemoveDriver verifies the driver store holds no development package'
+        Check ([bool]($uninstall | Where-Object { $_ -match '^Verified: no SSAP3 development certificate' })) 'RemoveDriver verifies no development certificate is left'
+        # Windows may add roots by itself (automatic root update) while the test runs;
+        # what matters is that nothing was removed and no SSAP3 certificate is left.
+        Check ([bool]($uninstall | Where-Object { $_ -match '^(Verified: LocalMachine\\Root matches the snapshot|LocalMachine\\Root differs from the snapshot .*\(\+\d+ / -0\))' })) 'RemoveDriver checks LocalMachine\Root against the snapshot taken before the first change (nothing removed)'
+        Check ([bool]($uninstall | Where-Object { $_ -match '^Not verified by this tool' })) 'RemoveDriver says what it cannot verify'
+    }
 
     # --------------------------------------------------- 7. tracking verdicts
     $sweep = @(for ($i = 0; $i -lt 40; $i++) { [pscustomobject]@{ Mode = 2; Tracking = 1; Norm = 1.0; Yaw = -40 + 2 * $i; Pitch = 2.0; Roll = -1.0; AgeMs = 20 } })
@@ -248,6 +458,7 @@ try {
     Check ($none.Samples -eq 0 -and -not $none.RealTracking) 'no head-pose record: no tracking claimed'
 }
 finally {
+    if ($script:RootDevice) { Invoke-Ssap3DevNative (Join-Path $env:SystemRoot 'System32\pnputil.exe') @('/remove-device', $script:RootDevice) | Out-Null }
     try { Remove-Ssap3DevCertificate | Out-Null } catch { Write-Output "WARN  cleanup: $($_.Exception.Message)" }
     foreach ($thumbprint in $decoys) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -Force -ErrorAction SilentlyContinue }
     if ($elevated) {
@@ -260,10 +471,21 @@ finally {
 
 $after = Get-Snapshot
 foreach ($name in 'Root', 'TrustedPublisher', 'My', 'Packages') {
+    $label = @{ Root = 'LocalMachine\Root'; TrustedPublisher = 'LocalMachine\TrustedPublisher'; My = 'CurrentUser\My'; Packages = 'the SSAP3 driver-store packages' }[$name]
     $then = @($before.$name)
     $now = @($after.$name)
-    $difference = @($then | Where-Object { $_ -notin $now }) + @($now | Where-Object { $_ -notin $then })
-    Check ($difference.Count -eq 0) "after cleanup, $(@{ Root = 'LocalMachine\Root'; TrustedPublisher = 'LocalMachine\TrustedPublisher'; My = 'CurrentUser\My'; Packages = 'the SSAP3 driver-store packages' }[$name]) matches the state before the test"
+    $missing = @($then | Where-Object { $_ -notin $now })
+    $added = @($now | Where-Object { $_ -notin $then })
+    Check ($missing.Count -eq 0) "after cleanup, nothing that was in $label before the test is missing"
+    if ($name -in 'Root', 'TrustedPublisher', 'My') {
+        $location, $store = if ($name -eq 'My') { 'CurrentUser', 'My' } else { 'LocalMachine', $name }
+        $leftover = @(Get-Ssap3DevCertificates $location $store)
+        Check ($leftover.Count -eq 0) "after cleanup, no SSAP3 development certificate is left in $label"
+        if ($added.Count -gt $leftover.Count) { Write-Output "INFO  $label gained $($added.Count - $leftover.Count) certificate(s) during the test that are not SSAP3's (for example Windows' automatic root update)" }
+    }
+    else {
+        Check ($added.Count -eq 0) "after cleanup, $label match the state before the test"
+    }
 }
 
 if ($failures.Count -gt 0) {

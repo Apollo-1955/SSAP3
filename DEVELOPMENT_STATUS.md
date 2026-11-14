@@ -1,7 +1,7 @@
 # SSAP3 development status
 
 - **Branch:** `development/ssap3` (from `main` at `114143c`)
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-14
 
 ## Milestones
 
@@ -54,6 +54,7 @@ The status legend:
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
 | Measured-HRIR renderer (KEMAR table, offline converter, crossfaded updates) | ✓ | ✓ design checked offline (C# port on the generated table); **CI run #19: `/W4 /WX` build, CodeQL clean, all HRIR, click and real-time tests pass** (`docs/TECHNICAL_REPORT.md` §5.3) | ✓ engine 2.6.0 installed 2026-11-14 (digest-verified CI artifact; reinstall log clean) | **Fixed mode ✓ (engine 2.7.0, 2026-11-14):** the user compared Measured and Classic on AirPods Pro 3 and found Measured good. The uncorrected 2.6.0 had been judged worse (thin bass, harsh or muffled tone, space felt wrong). This is a subjective listening test; head-tracked rendering is not verified (needs the signed driver) |
 | Driver signing verification (`Test-Ssap3Driver.ps1`, Setup's signature rule, `Sign-AttestationCab.ps1`) | ✓ | ✓ CI: unsigned, tampered and spoofed-publisher packages; EV-helper rehearsal | ✓ on real Microsoft-signed catalogs on this PC (79 WHQL and 1 attestation accepted, 5 third-party refused; a one-bit change detected); health check on this PC: all security checks pass, driver not installed | — (no Microsoft-signed SSAP3 driver yet) |
+| Temporary development signing (`tools/dev/Ssap3DevSigning.ps1`): local certificate, signing, four-level verification, gated test mode, driver install and removal, tracking watcher | ✓ | CI: full lifecycle on a throwaway runner certificate (`tools/dev/Test-DevSigning.ps1`; see CI history) | ✓ read-only checks, certificate round trip and watcher on this PC. Test mode is **blocked by Secure Boot** here, by design | — (needs a development PC with Secure Boot off; `tools/dev/README.md`) |
 | Driver (C) | ✓ | protocol v4 after an independent review: compiles, links, passes InfVerif, the HVCI image checks, Microsoft's driver CodeQL suites and Inf2Cat; submission CAB built; signing-pipeline checks 16/16 (CI run #29). Not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
 | Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; the app writes fresh state (≈200 ms old, engine limit 750 ms) | **Fixed mode ✓:** the user heard a clear difference between Off and Fixed on AirPods Pro 3 (subjective listening test, 2026-11-13; state record confirmed `Mode=Fixed`). Tracked mode not verified (needs the signed AAP driver) |
@@ -105,7 +106,9 @@ The status legend:
    test). Still to do: run `Uninstall-SSAP3Local.ps1` and compare with a
    `Test-Ssap3SystemState.ps1 -Snapshot`.
 2. Load-test the driver on a development PC with Driver Verifier, and
-   submit it for attestation signing.
+   submit it for attestation signing. The development PC procedure,
+   including its temporary test signature, is in `tools/dev/README.md`.
+   This PC cannot do it, because Secure Boot is on.
 3. Run the installer and uninstaller on a disposable Windows 11 VM with
    before/after snapshots.
 4. ~~HRIR convolution renderer~~ **done 2026-11-13** (MIT KEMAR, compiled in).

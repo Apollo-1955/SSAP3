@@ -6,6 +6,12 @@ API for that channel, so SSAP3 uses a small kernel driver, `ssap3aap.sys`. A
 PC with Secure Boot on loads it only once **Microsoft** has signed it. SSAP3
 never asks you to turn off Secure Boot or enable Test Mode instead.
 
+Before that, developers can test the driver on a **dedicated development
+PC** with a temporary, locally generated test signature
+(`tools/dev/README.md`). That signature is not a Microsoft signature. It
+loads only in test mode, which Windows allows only with Secure Boot off, and
+SSAP3 Setup refuses it. The production path below does not change.
+
 This guide is for the maintainer who will do the signing. It is based on
 Microsoft's documentation, last checked on 2026-11-13:
 
@@ -52,6 +58,7 @@ Steps 11–15 are described below. Results so far are in
 | `installer\Test-Ssap3Driver.ps1` | Any PC, no elevation needed | Read-only health check: package signature and integrity, system security, installed driver, device state, control interface and head-tracking freshness. |
 | `installer\build-installer.ps1 -SignedDriverFolder` | Your PC | Refuses to package a driver that is not Microsoft-signed for exactly these files. |
 | SSAP3 Setup (`Install-Ssap3Driver`) | Elevated, at install | Applies the same rule again, then installs with `pnputil`. Restart notices come from pnputil exit code 3010. |
+| `tools\dev\Ssap3DevSigning.ps1` | A dedicated development PC only (test mode, Secure Boot off) | Temporary development signing: a local certificate, signing, verification, gated test mode, and driver install and removal. Never used by Setup or for releases. CI rehearses it with `tools\dev\Test-DevSigning.ps1`. |
 
 ## How a Microsoft signature is recognised
 
