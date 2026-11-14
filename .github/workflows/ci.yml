@@ -70,7 +70,7 @@ jobs:
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\build-spatializer.ps1
 
-      - name: Spatial engine tests (bit-exact Off, NaN/Inf/stale rejection, click test)
+      - name: Spatial engine tests (bit-exact Off, NaN/Inf/stale rejection, HRIR cues, click tests, real-time headroom)
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\audio\test-spatializer.ps1
 

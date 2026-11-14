@@ -73,17 +73,20 @@ check it.
 - Reads the shared record with a sequence lock, and validates magic, version
   and enums, finite unit quaternions, parameter ranges, and freshness
   (`GetTickCount64`, 750 ms).
-- Rotates each world-fixed virtual speaker into the head frame and renders
-  interaural time and level differences, head shadowing (direction-dependent
-  low-pass), an elevation tilt, early reflections and a 4-line FDN room.
-- Parameters are interpolated per sample. Mode switches crossfade over
-  25 ms. Off is bit-exact. Non-finite input is sanitised and the output is
-  limited.
+- Rotates each world-fixed virtual speaker into the head frame and convolves
+  it with measured HRIRs (MIT KEMAR). The four nearest measurements are
+  blended onset-aligned and resampled to the device rate with a band-limited
+  kernel that also applies the sub-sample ITD. Early reflections and a
+  4-line FDN room follow. Details: `docs/TECHNICAL_REPORT.md` §5.
+- Filter updates crossfade within the block, and mode switches crossfade
+  over 25 ms. Off is bit-exact. Non-finite input is sanitised and the output
+  is limited.
 - Allocation-free and lock-free in `Process()`. It flushes denormals and
   restores the host's FP state afterwards.
 
-HRIR convolution with SOFA-derived data is planned (ADR-5). SOFA files will be
-parsed in the unprivileged app, never inside `audiodg.exe`.
+The HRIR table is generated offline (`tools/hrtf`) and compiled in, so the
+engine parses no files. SOFA import is not implemented. If it is added, it
+belongs in that offline converter, never inside `audiodg.exe` (ADR-5).
 
 ## Control path and acknowledgement
 

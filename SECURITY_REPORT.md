@@ -51,6 +51,7 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-30 | Info | Inbound L2CAP MTU raised from 512 to 2582 bytes (iOS's value) so the AirPods announce their motion service | **Bounded** | Inbound and outbound limits are separate constants (outbound stays 512). Queue depth went from 32 to 16 (about 41 KB of `NonPagedPoolNx` per session, at most 4 sessions per device). Every copy is length-checked. Protocol bumped to v3. Compile-time size checks keep the C structures and the C# client in step. |
 | S-32 | Medium | New network surface: the optional companion motion connection (`docs/COMPANION_PROTOCOL.md`) | **Mitigated by design (loopback-tested)** | Off unless the user selects Companion and pairs. Controls:<br>- outbound only (no listening socket, no firewall rule);<br>- only loopback, private, link-local, CGNAT/Tailscale and IPv6 ULA/link-local addresses;<br>- mutual HMAC-SHA256 key proof over fresh nonces (constant-time);<br>- AES-256-GCM records with an HKDF session key and strictly increasing counters;<br>- fixed-size validated records, at most 400 per second;<br>- pairing key in DPAPI (current user, app entropy), never in settings or logs;<br>- simulated senders labelled.<br>Tested: tamper on every byte, replay, wrong key, public-address refusal, and loopback sessions. |
 | S-31 | Medium | The motion parser read fixed offsets inside a protobuf message, so it misread 80-byte packets | **Fixed** | `ProtobufReader` and `SensorDataWx.TryParse` are total and allocation-free. They reject overlong varints, unsupported wire types, field number 0, lengths past the end and service ids above 65535. Unit tests cover each case, and 200 000 randomized inputs run through the protobuf reader and the sensor parsers. |
+| S-33 | Info | New data in the DSP: measured HRIR responses (MIT KEMAR) for the convolution renderer | **No new runtime input (by design)** | Nothing is loaded or parsed in `audiodg.exe`. The offline converter (`tools/hrtf/HrirTableBuilder`, developer PC only) validates the source set, which it reads from a SHA-256-pinned archive, and emits a C++ header that is compiled in as constant data. In the engine:<br>- `static_assert`s check the table's layout (ring order, azimuth range 0–180), and that the longest convolution window (onset bound × 384 kHz + 512 taps) fits the masked 32 768-sample history;<br>- every index is clamped or masked;<br>- the per-block filter build uses fixed-size stack arrays, with no allocation, locks or I/O;<br>- the kernel table is computed only on the dispatcher thread when the sample rate changes.<br>The shared-state validation (S-04) is unchanged. |
 
 No **critical or high** finding is open in source. Several fixes are **not
 yet compiled or executed** (see §6). Until they are, they are not
@@ -65,6 +66,7 @@ release-verified, and a production release stays blocked.
 | BLE advertisements from any nearby device | User-mode parser | 255-byte cap, total parser, model and RSSI filter |
 | Driver IOCTL interface | Interactive users only | 5 IOCTLs, size and ownership checks, session caps, allowlist, timeouts |
 | Shared state file | Interactive users write; `audiodg` reads | Protected ACL (no create or delete); DSP validation; seqlock |
+| HRIR data | None at run time: compiled into the engine DLL as constant data | Generated offline from a hash-pinned archive; layout and bounds checked at compile time (S-33) |
 | Settings JSON (per user) | Same user | 64 KiB cap, typed deserialisation, range validation |
 | Installer and uninstaller | Administrators | Admin-only paths, ownership checks, manifest, rollback |
 | SoundVolumeView child process | App launches it | Installed path plus SHA-256 pin |
@@ -170,7 +172,9 @@ after setup.
 
 - The AAP features need a Microsoft-signed driver, which does not exist yet.
 - The head-tracking decoder is unverified on AirPods Pro 3.
-- The renderer is parametric. HRTF/SOFA support is not implemented yet.
+- The renderer uses one generic, non-personalised dummy-head HRTF (MIT
+  KEMAR). SOFA import is not implemented; when it is, the parser must live
+  in the offline converter, not in the engine (ADR-5).
 - The microphone VAD exists in Core but is not wired to an audio input.
 - Exclusive-mode and ASIO audio bypass the engine.
 - The opt-in engine requires `DisableProtectedAudioDG`, which weakens a

@@ -71,6 +71,18 @@ only that format and renders with partitioned convolution, crossfading
 between directions. SOFA support does **not** provide Apple's Personalized
 Spatial Audio or an ear scan.
 
+*Implemented so far (2026-11-13):*
+
+- One dataset, MIT KEMAR, converted by an offline developer tool
+  (`tools/hrtf/HrirTableBuilder`) into a table compiled into the engine.
+  That is stricter than loading a file: the DSP reads no HRTF data at run
+  time.
+- Direct convolution (106 taps at 48 kHz) instead of partitioned
+  convolution, because the responses are short.
+- Crossfading between directions.
+
+*Not started:* SOFA import.
+
 **ADR-6 — Conversation detection is local and never records.** Speech
 sources, in order of preference:
 

@@ -86,8 +86,9 @@ Installation and removal are covered in [docs/INSTALL.md](docs/INSTALL.md).
   cannot process them.
 - Classic Bluetooth cannot carry A2DP stereo and the AirPods microphone at the
   same time. Use another microphone for calls and games.
-- SOFA/HRTF support does not give you Apple's Personalized Spatial Audio or an
-  ear scan.
+- The soundstage uses measured HRTFs from a generic dummy head (MIT KEMAR).
+  It is not personalised, and it does not give you Apple's Personalized
+  Spatial Audio or use an ear scan.
 
 ## License and credits
 

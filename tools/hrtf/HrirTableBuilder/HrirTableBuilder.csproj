@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Offline tool: converts the MIT KEMAR diffuse-field equalized HRTFs into
+    audio/SSAP3Spatializer/ssap3_hrir_data.h. It is not part of the app and
+    never runs inside audiodg.exe. See tools/hrtf/README.md.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+</Project>

@@ -92,7 +92,7 @@
                         </StackPanel>
                     </Border>
                     <TextBlock Style="{StaticResource Note}"
-                               Text="The current renderer models interaural time and level differences, head shadowing and a compact treated room. HRTF/SOFA convolution is on the roadmap. SOFA files will never give Apple's Personalized Spatial Audio or an ear scan." />
+                               Text="The renderer uses measured head-related responses from a generic dummy head (MIT KEMAR), interpolated for every head direction, plus a compact treated room. It is not personalised: it does not give Apple's Personalized Spatial Audio or use an ear scan." />
                 </StackPanel>
             </ScrollViewer>
         </TabItem>

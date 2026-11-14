@@ -2,6 +2,24 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Measured-HRTF soundstage** (`docs/TECHNICAL_REPORT.md` §5). The spatial
+  engine (version 2.6.0) convolves each virtual speaker with measured
+  head-related impulse responses (MIT KEMAR, credited in `THIRD_PARTY.md`)
+  instead of the parametric model.
+  - Directions are interpolated between measurements.
+  - The ITD is exact to a fraction of a sample at any device rate.
+  - Filter updates crossfade, so turning the head never clicks.
+  - Loudness and headroom match the previous renderer.
+  - The table is generated offline (`tools/hrtf`) and compiled in. The engine
+    loads no files.
+  - New C++ tests cover:
+    - ITD/ILD at known directions, left/right mirroring, front/back and
+      elevation differences;
+    - consistency from 8 to 384 kHz;
+    - loudness;
+    - clicks while the head sweeps or the stage moves;
+    - bit-exact Off after On;
+    - real-time headroom.
 - **Motion providers** (`docs/TECHNICAL_REPORT.md`). Tracked mode now runs on
   a provider interface (`IMotionSource`) with three implementations:
   - AirPods sensors over the AAP driver;

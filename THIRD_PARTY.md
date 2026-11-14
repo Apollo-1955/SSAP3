@@ -89,6 +89,32 @@ included:
 - starman-tech/mousepods (Apache-2.0);
 - freaktopus/auricle (MIT).
 
+## Measured HRTF data
+
+The spatial engine's direct path uses head-related impulse responses derived
+from the **MIT KEMAR HRTF measurements** (diffuse-field equalized set):
+
+> W. G. Gardner and K. D. Martin, "HRTF measurements of a KEMAR dummy-head
+> microphone", MIT Media Lab Perceptual Computing Technical Report #280, 1994;
+> also J. Acoust. Soc. Am. 97(6), 3907–3908, 1995.
+> https://sound.media.mit.edu/resources/KEMAR.html
+
+The data's terms, as stated by the MIT Media Lab: "This data is Copyright
+1994 by the MIT Media Laboratory. It is provided free with no restrictions on
+use, provided the authors are cited when the data is used in any research or
+commercial application."
+
+- **What SSAP3 includes:** only a derived table,
+  `audio/SSAP3Spatializer/ssap3_hrir_data.h`. Each response is onset-aligned
+  and truncated to 96 of its original 128 taps, and the 16-bit values are
+  unchanged. The original archive is not redistributed.
+- **Source archive:** `diffuse.zip`, SHA-256
+  `A48E73137390626EF1E45D1DE6A4D98530C6AA570E71B40F7C4442241ED5FA22`.
+- **Converter:** `tools/hrtf/HrirTableBuilder`. See `tools/hrtf/README.md`.
+
+KEMAR is a generic dummy head. These responses are not personalised and
+have nothing to do with Apple's Personalized Spatial Audio.
+
 ## VST compatibility declarations
 
 The minimal VST 2 ABI declarations used by `SSAP3Spatializer` are compatible

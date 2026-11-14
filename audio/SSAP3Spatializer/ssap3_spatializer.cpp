@@ -5,6 +5,14 @@
 // network access, no calls into managed code. The shared head-pose record is
 // treated as untrusted input and validated on every read (SECURITY_AUDIT.md,
 // finding S-04).
+//
+// Direct path: each virtual speaker is convolved with measured head-related
+// impulse responses (MIT KEMAR, diffuse-field equalized; ssap3_hrir_data.h is
+// compiled in, so nothing is parsed or loaded at run time). Per block, the
+// four nearest measurements are blended bilinearly for the head-relative
+// direction, resampled to the device rate with a band-limited kernel that
+// also applies the sub-sample onset (ITD), and the output crossfades from the
+// previous filters to the new ones, so head movement never clicks.
 
 // Also passed on the command line; repeated so every build of this file is safe
 // from the windows.h min/max macros.
@@ -25,11 +33,15 @@
 #include <cstring>
 #include <new>
 
+#include "ssap3_hrir_data.h"
 #include "ssap3_shared_state.h"
 #include "vst2_abi.h"
 
 namespace
 {
+namespace hrir = ssap3::hrir;
+
+constexpr double kPiDouble = 3.14159265358979323846;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegreesToRadians = kPi / 180.0f;
 constexpr float kRadiansToDegrees = 180.0f / kPi;
@@ -46,7 +58,117 @@ constexpr float kReturnToCentreTau = 0.8f;
 constexpr wchar_t kStateFileRelativePath[] = L"\\SSAP3\\Runtime\\head-pose.bin";
 constexpr wchar_t kStatePathOverrideVariable[] = L"SSAP3_SPATIAL_STATE_PATH";
 
+// HRIR renderer limits. 512 device-rate taps hold the whole 96-tap (2.2 ms)
+// measurement up to 235 kHz; above that the tail is faded out.
+constexpr int kMaxDeviceTaps = 512;
+constexpr int kKernelPhases = 128;        // resampling kernel table resolution (linearly interpolated)
+constexpr int kKernelZeroCrossings = 16;  // per side, at the source rate
+constexpr int kMaxKernelHalfWidth = 48;   // source samples; bounds the kernel when downsampling
+constexpr int kKernelTableSize = 2 * kMaxKernelHalfWidth * kKernelPhases + 2;
+constexpr int kMaxDirectionWeights = 4;   // two azimuths on each of two elevation rings
+constexpr float kMaxSampleRate = 384000.0f;
+// Filters are rebuilt (and crossfaded) when a speaker's head-relative
+// direction moves further than this from the one they were built for.
+constexpr float kDirectionEpsilonDegrees = 0.02f;
+// Direct-path level. With the diffuse-field unit-power table, the default
+// +-30 degree stage at 48 kHz has a coherent near+far ear gain of 2.08 at
+// 500 Hz and a white-noise power of 2.25 per ear; 0.40 brings both to the
+// parametric renderer this replaced (0.82 and 0.37), so loudness and
+// clipping headroom stay the same.
+constexpr float kHrirTrim = 0.40f;
+
+// Compile-time checks of the generated table: the lookup below relies on
+// these properties, so a malformed table fails the build instead of reading
+// out of bounds.
+static_assert(hrir::kTaps > 0 && hrir::kTaps <= 2 * kMaxKernelHalfWidth, "Unexpected HRIR length.");
+static_assert(hrir::kRingCount >= 2 && hrir::kEntryCount > 0, "The HRIR table needs at least two rings.");
+static_assert([]() constexpr
+{
+    if (hrir::kRingStart[0] != 0 || hrir::kRingStart[hrir::kRingCount] != hrir::kEntryCount)
+    {
+        return false;
+    }
+
+    for (int ring = 0; ring < hrir::kRingCount; ++ring)
+    {
+        const int begin = hrir::kRingStart[ring];
+        const int end = hrir::kRingStart[ring + 1];
+        if (end <= begin || hrir::kAzimuth[begin] != 0 ||
+            (end - begin > 1 && hrir::kAzimuth[end - 1] != 180) ||
+            (ring > 0 && hrir::kRingElevation[ring] <= hrir::kRingElevation[ring - 1]))
+        {
+            return false;
+        }
+
+        for (int entry = begin + 1; entry < end; ++entry)
+        {
+            if (hrir::kAzimuth[entry] <= hrir::kAzimuth[entry - 1])
+            {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}(), "The HRIR table must list rings by rising elevation, each from azimuth 0 to 180.");
+
+// Onsets are stored relative to the earliest one, which only removes a
+// common delay.
+constexpr int kCommonOnset = []() constexpr
+{
+    int minimum = 255;
+    for (int entry = 0; entry < hrir::kEntryCount; ++entry)
+    {
+        minimum = std::min({minimum, static_cast<int>(hrir::kOnset[entry][0]), static_cast<int>(hrir::kOnset[entry][1])});
+    }
+    return minimum;
+}();
+constexpr int kMaxRelativeOnset = []() constexpr
+{
+    int maximum = 0;
+    for (int entry = 0; entry < hrir::kEntryCount; ++entry)
+    {
+        maximum = std::max({maximum, static_cast<int>(hrir::kOnset[entry][0]), static_cast<int>(hrir::kOnset[entry][1])});
+    }
+    return maximum - kCommonOnset;
+}();
+constexpr float kMaxOnsetDelaySamples =
+    static_cast<float>(kMaxRelativeOnset) * (kMaxSampleRate / static_cast<float>(hrir::kSourceRate)) + 1.0f;
+static_assert(static_cast<int>(kMaxOnsetDelaySamples) + kMaxDeviceTaps + 2 < kDelayBufferSize,
+    "The longest HRIR window must fit in the input history.");
+
 using DelayLine = std::array<float, kDelayBufferSize>;
+
+// One ear's filter for one speaker at the device rate.
+struct EarFilter
+{
+    // Coefficients in reverse order, so the convolution is a forward dot
+    // product over the input window from oldest to newest sample.
+    std::array<float, kMaxDeviceTaps> reversed{};
+    int length = 0;
+    int wholeDelay = 0; // whole-sample part of the onset
+};
+
+using SpeakerFilters = std::array<EarFilter, 2>; // [ear]: 0 = left, 1 = right
+using FilterBank = std::array<SpeakerFilters, 2>; // [speaker]: 0 = left input, 1 = right input
+
+// Head-relative direction in degrees: azimuth positive to the listener's
+// right, elevation positive up.
+struct Direction
+{
+    float azimuth = 0.0f;
+    float elevation = 0.0f;
+};
+
+struct DirectionWeights
+{
+    std::array<int, kMaxDirectionWeights> entry{};
+    std::array<float, kMaxDirectionWeights> weight{};
+    int count = 0;
+    // KEMAR is measured on the right half; a source on the left uses the
+    // mirror-image measurement with the ears swapped.
+    bool mirrored = false;
+};
 
 struct Quaternion
 {
@@ -61,16 +183,6 @@ struct Vector3
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
-};
-
-struct RenderParameters
-{
-    float gainLeft = 0.0f;
-    float gainRight = 0.0f;
-    float delayLeft = 0.0f;
-    float delayRight = 0.0f;
-    float alphaLeft = 1.0f;
-    float alphaRight = 1.0f;
 };
 
 struct StageSettings
@@ -191,6 +303,107 @@ Vector3 SpeakerDirection(float azimuthDegrees, float elevationDegrees)
         std::sin(elevation)};
 }
 
+void AddWeight(DirectionWeights& weights, int entry, float weight)
+{
+    if (weight > 0.0f && weights.count < kMaxDirectionWeights)
+    {
+        weights.entry[weights.count] = entry;
+        weights.weight[weights.count] = weight;
+        ++weights.count;
+    }
+}
+
+// Linear interpolation between the two measured azimuths around `azimuth`
+// (0-180 degrees) on one elevation ring.
+void AddRing(DirectionWeights& weights, int ring, float azimuth, float ringWeight)
+{
+    if (!(ringWeight > 0.0f))
+    {
+        return;
+    }
+
+    const int begin = hrir::kRingStart[ring];
+    const int end = hrir::kRingStart[ring + 1];
+    if (end - begin == 1)
+    {
+        // The zenith is a single measurement.
+        AddWeight(weights, begin, ringWeight);
+        return;
+    }
+
+    int lower = begin;
+    while (lower + 2 < end && static_cast<float>(hrir::kAzimuth[lower + 1]) <= azimuth)
+    {
+        ++lower;
+    }
+
+    const float from = static_cast<float>(hrir::kAzimuth[lower]);
+    const float to = static_cast<float>(hrir::kAzimuth[lower + 1]);
+    const float fraction = std::clamp((azimuth - from) / (to - from), 0.0f, 1.0f);
+    AddWeight(weights, lower, ringWeight * (1.0f - fraction));
+    AddWeight(weights, lower + 1, ringWeight * fraction);
+}
+
+// Bilinear weights over the measured grid (elevation rings, then azimuth).
+// Elevations below the lowest measured ring (-40 degrees) use that ring.
+DirectionWeights MeasuredDirectionWeights(const Direction& direction)
+{
+    DirectionWeights weights{};
+    float azimuth = IsFinite(direction.azimuth) ? std::fmod(direction.azimuth, 360.0f) : 0.0f;
+    if (azimuth > 180.0f)
+    {
+        azimuth -= 360.0f;
+    }
+    else if (azimuth <= -180.0f)
+    {
+        azimuth += 360.0f;
+    }
+
+    // The measured median plane is identical for both ears, so the mirror
+    // image meets the measured half without a seam at 0 and 180 degrees.
+    weights.mirrored = azimuth < 0.0f;
+    azimuth = std::min(std::abs(azimuth), 180.0f);
+
+    const float lowest = static_cast<float>(hrir::kRingElevation[0]);
+    const float highest = static_cast<float>(hrir::kRingElevation[hrir::kRingCount - 1]);
+    const float elevation = std::clamp(IsFinite(direction.elevation) ? direction.elevation : 0.0f, lowest, highest);
+    int lower = 0;
+    while (lower + 2 < hrir::kRingCount && static_cast<float>(hrir::kRingElevation[lower + 1]) <= elevation)
+    {
+        ++lower;
+    }
+
+    const float from = static_cast<float>(hrir::kRingElevation[lower]);
+    const float to = static_cast<float>(hrir::kRingElevation[lower + 1]);
+    const float fraction = std::clamp((elevation - from) / (to - from), 0.0f, 1.0f);
+    AddRing(weights, lower, azimuth, 1.0f - fraction);
+    AddRing(weights, lower + 1, azimuth, fraction);
+    return weights;
+}
+
+// SSE dot product (always available on x64), unaligned loads.
+float Dot(const float* coefficients, const float* samples, int count)
+{
+    __m128 sum0 = _mm_setzero_ps();
+    __m128 sum1 = _mm_setzero_ps();
+    int index = 0;
+    for (; index + 8 <= count; index += 8)
+    {
+        sum0 = _mm_add_ps(sum0, _mm_mul_ps(_mm_loadu_ps(coefficients + index), _mm_loadu_ps(samples + index)));
+        sum1 = _mm_add_ps(sum1, _mm_mul_ps(_mm_loadu_ps(coefficients + index + 4), _mm_loadu_ps(samples + index + 4)));
+    }
+
+    float lanes[4] = {};
+    _mm_storeu_ps(lanes, _mm_add_ps(sum0, sum1));
+    float total = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    for (; index < count; ++index)
+    {
+        total += coefficients[index] * samples[index];
+    }
+
+    return total;
+}
+
 bool Ssap3ValidateState(const ssap3::SharedStateV2& snapshot, ValidatedState& result)
 {
     result = ValidatedState{};
@@ -277,7 +490,7 @@ public:
         effect_.ioRatio = 1.0f;
         effect_.object = this;
         effect_.uniqueId = kSsap3UniqueId;
-        effect_.version = 0x00020500;
+        effect_.version = 0x00020600;
         effect_.processReplacing = ProcessReplacing;
         ResetDsp();
     }
@@ -349,7 +562,7 @@ private:
             CopyText(pointer, "SSAP3 contributors", 64);
             return 1;
         case effGetVendorVersion:
-            return 20500;
+            return 20600;
         case effCanDo:
             if (pointer == nullptr)
             {
@@ -441,16 +654,29 @@ private:
         orientation_ = Slerp(orientation_, targetOrientation, 1.0f - std::exp(-blockSeconds / tau));
 
         const auto& stage = state.stage;
-        const RenderParameters leftTarget = SourceParameters(-stage.speakerAzimuth, stage);
-        const RenderParameters rightTarget = SourceParameters(stage.speakerAzimuth, stage);
-        if (!parametersPrimed_)
+        const std::array<Direction, 2> directions{
+            HeadRelativeDirection(-stage.speakerAzimuth, stage.speakerElevation),
+            HeadRelativeDirection(stage.speakerAzimuth, stage.speakerElevation)};
+        bool crossfade = false;
+        if (!filtersPrimed_)
         {
-            leftParameters_ = leftTarget;
-            rightParameters_ = rightTarget;
-            parametersPrimed_ = true;
+            BuildFilters(directions, banks_[activeBank_]);
+            filterDirections_ = directions;
+            filtersPrimed_ = true;
+        }
+        else if (DirectionsChanged(directions))
+        {
+            // The new filters go into the other bank; this block fades from
+            // the old bank's output to the new one's.
+            activeBank_ ^= 1;
+            BuildFilters(directions, banks_[activeBank_]);
+            filterDirections_ = directions;
+            crossfade = true;
         }
 
-        const float directGain = std::clamp(1.0f / stage.speakerDistance, 0.35f, 1.5f);
+        const FilterBank& current = banks_[activeBank_];
+        const FilterBank& previous = banks_[activeBank_ ^ 1];
+        const float directGain = kHrirTrim * std::clamp(1.0f / stage.speakerDistance, 0.35f, 1.5f);
         const float earlyMix = 0.285f * stage.roomMix;
         const float lateMix = 0.16f * stage.roomMix;
         const float mixStep = 1.0f / std::max(1.0f, kMixRampSeconds * sampleRate_);
@@ -463,30 +689,23 @@ private:
             delayLeft_[writeIndex_] = Sanitize(inputLeft);
             delayRight_[writeIndex_] = Sanitize(inputRight);
 
-            // Interpolate per-sample from the previous block's parameters so
-            // head movement never steps the delay lines (no zipper noise).
-            const float t = static_cast<float>(frame + 1) * inverseFrames;
-            const RenderParameters left = Lerp(leftParameters_, leftTarget, t);
-            const RenderParameters right = Lerp(rightParameters_, rightTarget, t);
-
-            const float leftToLeft = FilterContribution(
-                ReadDelay(delayLeft_, left.delayLeft), leftLowPass_[0], left.alphaLeft);
-            const float leftToRight = FilterContribution(
-                ReadDelay(delayLeft_, left.delayRight), leftLowPass_[1], left.alphaRight);
-            const float rightToLeft = FilterContribution(
-                ReadDelay(delayRight_, right.delayLeft), rightLowPass_[0], right.alphaLeft);
-            const float rightToRight = FilterContribution(
-                ReadDelay(delayRight_, right.delayRight), rightLowPass_[1], right.alphaRight);
+            std::array<float, 2> direct{};
+            for (int ear = 0; ear < 2; ++ear)
+            {
+                float value = Convolve(delayLeft_, current[0][ear]) + Convolve(delayRight_, current[1][ear]);
+                if (crossfade)
+                {
+                    const float progress = static_cast<float>(frame + 1) * inverseFrames;
+                    const float old = Convolve(delayLeft_, previous[0][ear]) + Convolve(delayRight_, previous[1][ear]);
+                    value = old + (value - old) * progress;
+                }
+                direct[ear] = value;
+            }
 
             const auto early = CalculateEarlyReflections();
             const auto late = ProcessRoom(0.5f * (delayLeft_[writeIndex_] + delayRight_[writeIndex_]));
-            constexpr float kDirectTrim = 0.65f;
-            const float wetLeft =
-                (leftToLeft * left.gainLeft + rightToLeft * right.gainLeft) * kDirectTrim * directGain +
-                early[0] * earlyMix + late[0] * lateMix;
-            const float wetRight =
-                (leftToRight * left.gainRight + rightToRight * right.gainRight) * kDirectTrim * directGain +
-                early[1] * earlyMix + late[1] * lateMix;
+            const float wetLeft = direct[0] * directGain + early[0] * earlyMix + late[0] * lateMix;
+            const float wetRight = direct[1] * directGain + early[1] * earlyMix + late[1] * lateMix;
 
             if (mix_ < targetMix)
             {
@@ -504,75 +723,164 @@ private:
             writeIndex_ = (writeIndex_ + 1) & kDelayMask;
         }
 
-        leftParameters_ = leftTarget;
-        rightParameters_ = rightTarget;
         if (!RenderStateIsFinite())
         {
             ResetFilterState();
         }
     }
 
-    RenderParameters SourceParameters(float worldAzimuth, const StageSettings& stage) const
+    Direction HeadRelativeDirection(float worldAzimuth, float worldElevation) const
     {
-        const Vector3 head = RotateByInverse(
-            orientation_,
-            SpeakerDirection(worldAzimuth, stage.speakerElevation));
-        const float azimuth = std::atan2(head.x, head.y) * kRadiansToDegrees;
-        const float elevation = std::asin(std::clamp(head.z, -1.0f, 1.0f)) * kRadiansToDegrees;
-        return CalculateParameters(azimuth, elevation);
+        const Vector3 head = RotateByInverse(orientation_, SpeakerDirection(worldAzimuth, worldElevation));
+        Direction direction{};
+        direction.azimuth = std::atan2(head.x, head.y) * kRadiansToDegrees;
+        direction.elevation = std::asin(std::clamp(head.z, -1.0f, 1.0f)) * kRadiansToDegrees;
+        return direction;
     }
 
-    // Azimuth in degrees, positive to the listener's right; elevation in degrees.
-    RenderParameters CalculateParameters(float azimuthDegrees, float elevationDegrees) const
+    bool DirectionsChanged(const std::array<Direction, 2>& directions) const
     {
-        const float azimuth = IsFinite(azimuthDegrees) ? azimuthDegrees : 0.0f;
-        const float elevation = IsFinite(elevationDegrees) ? elevationDegrees : 0.0f;
-        const float radians = azimuth * kDegreesToRadians;
-        const float side = std::sin(radians);
-        const float rear = std::max(0.0f, -std::cos(radians));
-        const float lateral = std::abs(side);
-        const float height = std::sin(std::clamp(elevation, -90.0f, 90.0f) * kDegreesToRadians);
-
-        const float itdSamples = lateral * std::cos(elevation * kDegreesToRadians) * 0.00067f * sampleRate_;
-        const float brightness = 1.0f + 0.15f * height;
-        const float farEarGain = 0.59f - 0.19f * lateral - 0.06f * rear;
-        const float nearEarGain = 0.72f + 0.14f * lateral - 0.04f * rear;
-        const float farCutoff = std::clamp(
-            (7600.0f - 4800.0f * lateral - 1700.0f * rear) * brightness, 1500.0f, 8800.0f);
-        const float nearCutoff = std::clamp(
-            (16500.0f - 3500.0f * rear) * brightness, 9000.0f, 18000.0f);
-
-        RenderParameters parameters{};
-        if (side >= 0.0f)
+        for (std::size_t speaker = 0; speaker < directions.size(); ++speaker)
         {
-            parameters.gainLeft = farEarGain;
-            parameters.gainRight = nearEarGain;
-            parameters.delayLeft = itdSamples;
-            parameters.delayRight = 0.0f;
-            parameters.alphaLeft = LowPassAlpha(farCutoff);
-            parameters.alphaRight = LowPassAlpha(nearCutoff);
+            // Written so that a NaN also counts as a change.
+            if (!(std::abs(directions[speaker].azimuth - filterDirections_[speaker].azimuth) <= kDirectionEpsilonDegrees) ||
+                !(std::abs(directions[speaker].elevation - filterDirections_[speaker].elevation) <= kDirectionEpsilonDegrees))
+            {
+                return true;
+            }
         }
-        else
-        {
-            parameters.gainLeft = nearEarGain;
-            parameters.gainRight = farEarGain;
-            parameters.delayLeft = 0.0f;
-            parameters.delayRight = itdSamples;
-            parameters.alphaLeft = LowPassAlpha(nearCutoff);
-            parameters.alphaRight = LowPassAlpha(farCutoff);
-        }
-        return parameters;
+        return false;
     }
 
-    static RenderParameters Lerp(const RenderParameters& a, const RenderParameters& b, float t)
+    void BuildFilters(const std::array<Direction, 2>& directions, FilterBank& bank) const
     {
-        return RenderParameters{
-            a.gainLeft + (b.gainLeft - a.gainLeft) * t,
-            a.gainRight + (b.gainRight - a.gainRight) * t,
-            a.delayLeft + (b.delayLeft - a.delayLeft) * t,
-            a.delayRight + (b.delayRight - a.delayRight) * t,
-            a.alphaLeft + (b.alphaLeft - a.alphaLeft) * t,
-            a.alphaRight + (b.alphaRight - a.alphaRight) * t};
+        for (std::size_t speaker = 0; speaker < directions.size(); ++speaker)
+        {
+            const DirectionWeights weights = MeasuredDirectionWeights(directions[speaker]);
+            for (int ear = 0; ear < 2; ++ear)
+            {
+                BuildFilter(weights, ear, bank[speaker][ear]);
+            }
+        }
+    }
+
+    // Blends the measured responses at the source rate, then resamples the
+    // blend to the device rate. The resampling positions are shifted by the
+    // fractional part of the onset, so the sub-sample ITD is band-limited
+    // (no interpolation loss); the whole-sample part becomes a plain delay.
+    // Runs on the audio thread: fixed-size stack arrays only.
+    void BuildFilter(const DirectionWeights& weights, int ear, EarFilter& filter) const
+    {
+        std::array<float, hrir::kTaps> measured{};
+        float onset = 0.0f;
+        const int sourceEar = weights.mirrored ? 1 - ear : ear;
+        for (int index = 0; index < weights.count; ++index)
+        {
+            const int entry = weights.entry[index];
+            const float weight = weights.weight[index];
+            const float gain = weight * hrir::kScale;
+            const std::int16_t* response = hrir::kResponse[entry][sourceEar];
+            for (int tap = 0; tap < hrir::kTaps; ++tap)
+            {
+                measured[tap] += gain * static_cast<float>(response[tap]);
+            }
+            onset += weight * static_cast<float>(hrir::kOnset[entry][sourceEar] - kCommonOnset);
+        }
+
+        const float delay = std::clamp(onset * rateRatio_, 0.0f, kMaxOnsetDelaySamples);
+        const int whole = static_cast<int>(delay);
+        const float fraction = delay - static_cast<float>(whole);
+        const int halfWidth = kernelHalfWidth_;
+        const int tableLast = 2 * halfWidth * kKernelPhases;
+        const int length = std::clamp(deviceTaps_, 1, kMaxDeviceTaps);
+        for (int tap = 0; tap < length; ++tap)
+        {
+            // Source-rate position of this device-rate tap.
+            const float position = (static_cast<float>(tap) - fraction) / rateRatio_;
+            const int floorPosition = static_cast<int>(std::floor(position));
+            const int first = std::max(0, floorPosition - halfWidth + 1);
+            const int last = std::min(hrir::kTaps - 1, floorPosition + halfWidth);
+            float sum = 0.0f;
+            if (first <= last)
+            {
+                // Kernel argument for `first`; each later source sample is
+                // exactly one source sample (kKernelPhases entries) closer.
+                const float phase = (position - static_cast<float>(first) + static_cast<float>(halfWidth)) *
+                    static_cast<float>(kKernelPhases);
+                int table = std::clamp(static_cast<int>(phase), 0, tableLast);
+                const float blend = std::clamp(phase - static_cast<float>(table), 0.0f, 1.0f);
+                for (int source = first; source <= last && table >= 0; ++source, table -= kKernelPhases)
+                {
+                    const float kernel = kernelTable_[table] + (kernelTable_[table + 1] - kernelTable_[table]) * blend;
+                    sum += measured[source] * kernel;
+                }
+            }
+            filter.reversed[length - 1 - tap] = sum * tapFade_[tap];
+        }
+
+        filter.length = length;
+        filter.wholeDelay = whole;
+    }
+
+    // y[n] = sum_k h[k] x[n - wholeDelay - k], read straight from the input
+    // history (masked, so it cannot leave the buffer; the window is at most
+    // kMaxOnsetDelaySamples + kMaxDeviceTaps samples, checked at compile time).
+    float Convolve(const DelayLine& history, const EarFilter& filter) const
+    {
+        const int length = std::clamp(filter.length, 0, kMaxDeviceTaps);
+        const int start = (writeIndex_ - filter.wholeDelay - (length - 1)) & kDelayMask;
+        const int contiguous = std::min(length, kDelayBufferSize - start);
+        float sum = Dot(filter.reversed.data(), history.data() + start, contiguous);
+        if (contiguous < length)
+        {
+            sum += Dot(filter.reversed.data() + contiguous, history.data(), length - contiguous);
+        }
+        return sum;
+    }
+
+    // Windowed-sinc kernel (Blackman, kKernelZeroCrossings per side) from the
+    // 44.1 kHz measurements to the device rate, tabulated once per rate
+    // change (dispatcher thread, never Process). Upsampling keeps the source
+    // band; downsampling low-passes to the new Nyquist. The 1/ratio factor
+    // keeps the frequency response, not the tap sum, unchanged.
+    void ConfigureResampler()
+    {
+        rateRatio_ = sampleRate_ / static_cast<float>(hrir::kSourceRate);
+        const double ratio = static_cast<double>(rateRatio_);
+        const double cutoff = std::min(1.0, ratio);
+        kernelHalfWidth_ = std::clamp(
+            static_cast<int>(std::ceil(static_cast<double>(kKernelZeroCrossings) / cutoff)), 1, kMaxKernelHalfWidth);
+        const int wanted = static_cast<int>(std::ceil(static_cast<double>(hrir::kTaps) * ratio)) + 1;
+        deviceTaps_ = std::clamp(wanted, 1, kMaxDeviceTaps);
+
+        kernelTable_.fill(0.0f);
+        const int centre = kernelHalfWidth_ * kKernelPhases;
+        const double halfWidth = static_cast<double>(kernelHalfWidth_);
+        for (int index = 1; index < 2 * centre; ++index)
+        {
+            const double x = static_cast<double>(index - centre) / static_cast<double>(kKernelPhases);
+            double sinc = 1.0;
+            if (index != centre)
+            {
+                // Exact zeros at whole source samples when not band-limiting
+                // further, so 44.1 kHz reproduces the measurements exactly.
+                const double argument = kPiDouble * cutoff * x;
+                sinc = (cutoff >= 1.0 && (index - centre) % kKernelPhases == 0) ? 0.0 : std::sin(argument) / argument;
+            }
+
+            const double window = 0.42 + 0.5 * std::cos(kPiDouble * x / halfWidth) +
+                0.08 * std::cos(2.0 * kPiDouble * x / halfWidth);
+            kernelTable_[index] = static_cast<float>(cutoff / ratio * sinc * window);
+        }
+
+        const int fadeStart = wanted > kMaxDeviceTaps ? kMaxDeviceTaps - kMaxDeviceTaps / 8 : kMaxDeviceTaps;
+        for (int tap = 0; tap < kMaxDeviceTaps; ++tap)
+        {
+            tapFade_[tap] = tap < fadeStart
+                ? 1.0f
+                : static_cast<float>(0.5 * (1.0 + std::cos(kPiDouble * static_cast<double>(tap - fadeStart + 1) /
+                    static_cast<double>(deviceTaps_ - fadeStart + 1))));
+        }
     }
 
     std::array<float, 2> CalculateEarlyReflections()
@@ -671,12 +979,6 @@ private:
         return buffer[newer] * (1.0f - fraction) + buffer[older] * fraction;
     }
 
-    static float FilterContribution(float input, float& state, float alpha)
-    {
-        state += alpha * (input - state);
-        return state;
-    }
-
     static float Sanitize(float value)
     {
         return IsFinite(value) ? value : 0.0f;
@@ -689,9 +991,9 @@ private:
 
     bool RenderStateIsFinite() const
     {
+        // The HRIR path keeps no recursive state: its input history is
+        // sanitised on write and its coefficients come from the fixed table.
         bool finite = IsFinite(roomInputBass_);
-        for (const float value : leftLowPass_) finite = finite && IsFinite(value);
-        for (const float value : rightLowPass_) finite = finite && IsFinite(value);
         for (const float value : earlyRoomLowPass_) finite = finite && IsFinite(value);
         for (const float value : earlyRoomBass_) finite = finite && IsFinite(value);
         for (const float value : roomDamping_) finite = finite && IsFinite(value);
@@ -804,8 +1106,6 @@ private:
 
     void ResetFilterState()
     {
-        leftLowPass_.fill(0.0f);
-        rightLowPass_.fill(0.0f);
         earlyRoomLowPass_.fill(0.0f);
         earlyRoomBass_.fill(0.0f);
         roomDamping_.fill(0.0f);
@@ -820,11 +1120,12 @@ private:
     {
         ResetFilterState();
         roomIndex_.fill(0);
-        parametersPrimed_ = false;
+        filtersPrimed_ = false;
     }
 
     void ResetDsp()
     {
+        ConfigureResampler();
         delayLeft_.fill(0.0f);
         delayRight_.fill(0.0f);
         ResetRenderState();
@@ -848,15 +1149,19 @@ private:
     float sampleRate_ = 48000.0f;
     float mix_ = 0.0f;
     bool wasBypassed_ = true;
-    bool parametersPrimed_ = false;
+    bool filtersPrimed_ = false;
     Quaternion orientation_{};
-    RenderParameters leftParameters_{};
-    RenderParameters rightParameters_{};
+    std::array<FilterBank, 2> banks_{};
+    int activeBank_ = 0;
+    std::array<Direction, 2> filterDirections_{};
+    std::array<float, kKernelTableSize> kernelTable_{};
+    std::array<float, kMaxDeviceTaps> tapFade_{};
+    float rateRatio_ = 1.0f;
+    int kernelHalfWidth_ = 1;
+    int deviceTaps_ = 1;
     DelayLine delayLeft_{};
     DelayLine delayRight_{};
     std::array<DelayLine, kRoomLineCount> roomDelay_{};
-    std::array<float, 2> leftLowPass_{};
-    std::array<float, 2> rightLowPass_{};
     std::array<float, 2> earlyRoomLowPass_{};
     std::array<float, 2> earlyRoomBass_{};
     std::array<float, kRoomLineCount> roomDamping_{};
