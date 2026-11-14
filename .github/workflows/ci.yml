@@ -166,30 +166,43 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
-          # The windows-drivers suites reference microsoft/cpp-queries@0.0.5, which
-          # must be downloaded too (Microsoft's WHCP 26H1 pack table).
-          packs: microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls,microsoft/cpp-queries@0.0.5
+          queries: security-extended
       - name: Build driver for analysis
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: driver
-      - name: Gate on Microsoft must-fix driver queries
+      - name: Microsoft windows-drivers suites (must-fix results fail CI)
         shell: pwsh
         run: |
+          # As Microsoft documents for WHCP 26H1: download both packs explicitly (the
+          # suites reference microsoft/cpp-queries@0.0.5), then analyze the database
+          # the steps above built and finalized.
           $codeql = '${{ steps.init.outputs.codeql-path }}'
           $database = Join-Path $env:RUNNER_TEMP 'codeql_databases\cpp'
-          & $codeql database analyze $database 'microsoft/windows-drivers@1.10.0:windows-driver-suites/mustfix.qls' --download --format=sarifv2.1.0 --output=mustfix.sarif --threads=0
-          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=CodeQL must-fix analysis::codeql exited with $LASTEXITCODE"; exit 1 }
-          $sarif = Get-Content -LiteralPath mustfix.sarif -Raw | ConvertFrom-Json
-          $results = @($sarif.runs | ForEach-Object { if ($_.PSObject.Properties['results']) { $_.results } })
-          foreach ($result in $results) {
-            $location = $result.locations[0].physicalLocation
-            Write-Output "::error file=$($location.artifactLocation.uri),line=$($location.region.startLine),title=$($result.ruleId)::$($result.message.text)"
+          & $codeql pack download microsoft/windows-drivers@1.10.0 microsoft/cpp-queries@0.0.5
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=CodeQL pack download::codeql exited with $LASTEXITCODE"; exit 1 }
+          foreach ($suite in 'recommended', 'mustfix') {
+            & $codeql database analyze $database "microsoft/windows-drivers@1.10.0:windows-driver-suites/$suite.qls" --format=sarifv2.1.0 --output="driver-$suite.sarif" --sarif-category="driver-$suite" --threads=0
+            if ($LASTEXITCODE -ne 0) { Write-Output "::error title=CodeQL $suite suite::codeql exited with $LASTEXITCODE"; exit 1 }
           }
-          Write-Output "Must-fix results: $($results.Count)"
-          if ($results.Count -gt 0) { exit 1 }
+          foreach ($suite in 'recommended', 'mustfix') {
+            $sarif = Get-Content -LiteralPath "driver-$suite.sarif" -Raw | ConvertFrom-Json
+            $results = @($sarif.runs | ForEach-Object { if ($_.PSObject.Properties['results']) { $_.results } })
+            Write-Output "$suite results: $($results.Count)"
+            $level = if ($suite -eq 'mustfix') { 'error' } else { 'warning' }
+            foreach ($result in $results) {
+              $location = $result.locations[0].physicalLocation
+              Write-Output "::$level file=$($location.artifactLocation.uri),line=$($location.region.startLine),title=$($result.ruleId)::$($result.message.text)"
+            }
+            if ($suite -eq 'mustfix' -and $results.Count -gt 0) { exit 1 }
+          }
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always() && hashFiles('driver-recommended.sarif') != ''
+        with:
+          sarif_file: driver-recommended.sarif
+          category: driver-recommended
 
   scripts:
     name: Installer and tooling script checks

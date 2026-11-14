@@ -63,7 +63,9 @@ foreach ($requiredPath in @($compiler, $linker, $wdk, $sdk)) {
 New-Item -ItemType Directory -Force -Path $objectRoot, $binaryRoot | Out-Null
 
 $compilerArguments = @(
-    '/nologo', '/c', '/TC', '/kernel', '/O2', '/Oi', '/Gy', '/W4', '/WX',
+    # /Z7: debug info in the objects, so /DEBUG below can write ssap3aap.pdb
+    # (Partner Center needs it for Microsoft's crash analysis).
+    '/nologo', '/c', '/TC', '/kernel', '/O2', '/Oi', '/Gy', '/W4', '/WX', '/Z7',
     '/GS', '/guard:cf', '/Zp8', '/Zc:wchar_t', '/Zc:inline',
     '/wd4201', '/wd4214', '/wd4324',
     '/D_AMD64_', '/DAMD64', '/D_WIN64', '/DWIN64', '/D_WINDOWS',
@@ -102,7 +104,7 @@ $mapPath = Join-Path $binaryRoot 'ssap3aap.map'
 
 & $linker `
     /nologo /driver /kernel /subsystem:native,10.00 /entry:FxDriverEntry `
-    /machine:x64 /nodefaultlib /incremental:no /opt:ref /opt:icf `
+    /machine:x64 /nodefaultlib /incremental:no /debug /opt:ref /opt:icf `
     /dynamicbase /nxcompat /guard:cf /release `
     /merge:_TEXT=.text /merge:_PAGE=PAGE `
     "/out:$driverPath" `
@@ -126,6 +128,10 @@ $infPath = Join-Path $sourceRoot 'ssap3aap.inf'
 
 if ($LASTEXITCODE -ne 0) {
     throw "InfVerif failed with exit code $LASTEXITCODE."
+}
+
+if (-not (Test-Path -LiteralPath $pdbPath)) {
+    throw "link.exe did not write the symbol file $pdbPath."
 }
 
 $hash = Get-FileHash -LiteralPath $driverPath -Algorithm SHA256
