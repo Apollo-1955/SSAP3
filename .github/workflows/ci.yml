@@ -166,7 +166,9 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
-          packs: microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls
+          # The windows-drivers suites reference microsoft/cpp-queries@0.0.5, which
+          # must be downloaded too (Microsoft's WHCP 26H1 pack table).
+          packs: microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls,microsoft/cpp-queries@0.0.5
       - name: Build driver for analysis
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1

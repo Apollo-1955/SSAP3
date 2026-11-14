@@ -113,7 +113,9 @@ $unexpected = @($imports | Where-Object { $_.ToLowerInvariant() -notin $allowed 
 Report 'imports only kernel, HAL and KMDF loader' ($unexpected.Count -eq 0) ($imports -join ', ')
 
 # Sources.
-$code = Get-ChildItem -LiteralPath $SourceRoot -Include *.c, *.h -Recurse | ForEach-Object {
+# Files only: in Windows PowerShell 5.1, -Include with -LiteralPath also returns
+# folders (such as bin-msvc), which Get-Content cannot read.
+$code = Get-ChildItem -LiteralPath $SourceRoot -Recurse -File | Where-Object { $_.Extension -in '.c', '.h' } | ForEach-Object {
     $file = $_
     Get-Content -LiteralPath $file.FullName | ForEach-Object -Begin { $n = 0 } -Process { $n++; [pscustomobject]@{ File = $file.Name; Line = $n; Text = $_ } }
 }
