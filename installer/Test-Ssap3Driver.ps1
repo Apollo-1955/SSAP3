@@ -151,7 +151,7 @@ function Test-SystemSecurity {
     $options = "$(Get-RegistryValue 'HKLM:\SYSTEM\CurrentControlSet\Control' 'SystemStartOptions')"
     $testMode = $options -match 'TESTSIGNING'
     $noIntegrity = $options -match 'NOINTEGRITYCHECKS'
-    $detail = if ($testMode -or $noIntegrity) { "boot options contain $(@(if ($testMode) { 'TESTSIGNING' }; if ($noIntegrity) { 'NOINTEGRITYCHECKS' }) -join ' and '). SSAP3 never needs either; turn them off." } else { 'off (normal signature enforcement)' }
+    $detail = if ($testMode -or $noIntegrity) { "boot options contain $(@(if ($testMode) { 'TESTSIGNING' }; if ($noIntegrity) { 'NOINTEGRITYCHECKS' }) -join ' and '). Production SSAP3 never needs either. Expected only on a dedicated development PC (tools\dev\README.md); otherwise turn them off." } else { 'off (normal signature enforcement)' }
     Add-Result $area 'Test Mode / integrity checks' $(if ($testMode -or $noIntegrity) { 'Warn' } else { 'Pass' }) $detail
 
     try {

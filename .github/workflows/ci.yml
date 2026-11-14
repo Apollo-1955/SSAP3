@@ -111,7 +111,7 @@ jobs:
       - name: Restore pinned WDK packages
         run: dotnet restore driver/WdkPackages.proj
 
-      - name: Build driver and run InfVerif (unsigned; never test-signed in CI)
+      - name: Build driver and run InfVerif (unsigned; CI test-signs only throwaway copies)
         shell: pwsh
         run: |
           # Capture compiler/linker/InfVerif output so failures appear as public
@@ -163,6 +163,32 @@ jobs:
             Write-Output "::error title=Signing pipeline test crashed::$text"
           }
           exit $code
+
+      - name: Temporary development signing lifecycle (throwaway certificate on this runner; artifacts stay unsigned)
+        shell: pwsh
+        run: |
+          # Trusts a throwaway development certificate on this disposable runner, stages the
+          # test-signed package (never loaded: no test mode), then removes everything and
+          # checks the certificate stores against their state before the test.
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\dev\Test-DevSigning.ps1 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          $log | Where-Object { $_ -like 'FAIL*' } | ForEach-Object { Write-Output "::error title=Development signing check::$_" }
+          $summary = (@($log | Where-Object { $_ -match '^(PASS|SKIP|INFO)' }) -join ' | ').Replace('%', '%25')
+          Write-Output "::notice title=Development signing results::$summary"
+          if ($code -ne 0 -and -not ($log | Where-Object { $_ -like 'FAIL*' })) {
+            $text = (($log | Select-Object -Last 15) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Development signing test crashed::$text"
+          }
+          exit $code
+
+      - name: Published driver artifacts are unsigned (no development signature leaks out)
+        shell: pwsh
+        run: |
+          $files = @('driver/Ssap3Aap/bin-msvc/ssap3aap.sys', 'artifacts/attestation/ssap3aap.cab', 'artifacts/attestation/ssap3aap/ssap3aap.sys', 'artifacts/attestation/ssap3aap/ssap3aap.cat')
+          $bad = @($files | Where-Object { (Get-AuthenticodeSignature -LiteralPath $_).Status -ne 'NotSigned' })
+          $bad | ForEach-Object { Write-Output "::error title=Signed artifact::$_ carries a signature; published artifacts must be unsigned" }
+          if ($bad.Count -gt 0) { exit 1 }
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -263,6 +289,10 @@ jobs:
           # Test-Ssap3SystemState.ps1 is excluded: it only READS the Root store to detect leftovers.
           $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1, installer\Install-SSAP3Local.ps1, installer\Uninstall-SSAP3Local.ps1, installer\Test-Ssap3Driver.ps1, driver\Sign-AttestationCab.ps1, driver\Test-SigningPipeline.ps1 -Pattern $patterns
           if ($hits) { $hits | ForEach-Object { Write-Output "::error file=$($_.Path),line=$($_.LineNumber)::$($_.Line.Trim())" }; exit 1 }
+          # The development-signing tool (tools\dev) may switch test signing and trust its own
+          # certificate on a development PC. Production setup must never load or ship it.
+          $dev = Select-String -Path installer\*.ps1, installer\*.psm1, installer\SSAP3.iss -Pattern 'Ssap3DevSigning', 'Test-DevSigning'
+          if ($dev) { $dev | ForEach-Object { Write-Output "::error file=$($_.Path),line=$($_.LineNumber)::production setup references the development tools: $($_.Line.Trim())" }; exit 1 }
 
       - name: System-state verifier runs read-only on a clean runner
         shell: powershell
