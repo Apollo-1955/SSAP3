@@ -297,8 +297,12 @@ The details are in `SECURITY_REPORT.md`. Points specific to this work:
 - **No system security setting is changed.** There is no Test Mode, the
   driver is not signed by anyone but Microsoft, and the Equalizer APO
   hardening stays as before.
-- **Driver protocol v3.** Inbound MTU is 2582 with a bounded queue. Opcode
-  `0x17` only accepts sensor start/stop with a bounded interval.
+- **Driver protocol v4.** Inbound MTU is 2582 with a bounded queue.
+  - Opcode `0x17` only accepts sensor start/stop with a bounded interval.
+  - Every other outbound packet must be exactly one SSAP3 sends.
+  - IOCTLs require read or write access to the handle.
+  - The signature checks and test plan are in `driver/SIGNING.md` and
+    `docs/DRIVER_TEST_REPORT.md`.
 - **New network surface:** the optional, outbound-only, authenticated and
   encrypted companion connection.
 

@@ -51,6 +51,8 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-30 | Info | Inbound L2CAP MTU raised from 512 to 2582 bytes (iOS's value) so the AirPods announce their motion service | **Bounded** | Inbound and outbound limits are separate constants (outbound stays 512). Queue depth went from 32 to 16 (about 41 KB of `NonPagedPoolNx` per session, at most 4 sessions per device). Every copy is length-checked. Protocol bumped to v3. Compile-time size checks keep the C structures and the C# client in step. |
 | S-32 | Medium | New network surface: the optional companion motion connection (`docs/COMPANION_PROTOCOL.md`) | **Mitigated by design (loopback-tested)** | Off unless the user selects Companion and pairs. Controls:<br>- outbound only (no listening socket, no firewall rule);<br>- only loopback, private, link-local, CGNAT/Tailscale and IPv6 ULA/link-local addresses;<br>- mutual HMAC-SHA256 key proof over fresh nonces (constant-time);<br>- AES-256-GCM records with an HKDF session key and strictly increasing counters;<br>- fixed-size validated records, at most 400 per second;<br>- pairing key in DPAPI (current user, app entropy), never in settings or logs;<br>- simulated senders labelled.<br>Tested: tamper on every byte, replay, wrong key, public-address refusal, and loopback sessions. |
 | S-31 | Medium | The motion parser read fixed offsets inside a protobuf message, so it misread 80-byte packets | **Fixed** | `ProtobufReader` and `SensorDataWx.TryParse` are total and allocation-free. They reject overlong varints, unsupported wire types, field number 0, lengths past the end and service ids above 65535. Unit tests cover each case, and 200 000 randomized inputs run through the protobuf reader and the sensor parsers. |
+| S-34 | Medium | Setup accepted a driver catalog whose signature was valid and whose signer *name* was Microsoft's hardware publisher. It did not pin the root, check the driver-publisher EKU, check that the `.sys`/`.inf` were the signed files, or check that the package was SSAP3's at all, so a different Microsoft-signed driver renamed `ssap3aap.*` would have been installed | **Fixed (tested on real catalogs; CI run #29)** | `Get-Ssap3CatalogSignature`:<br>- pins the chain (built with the catalog's own certificates) to three Microsoft roots;<br>- requires the Windows Hardware Driver Verification EKU (attestation adds `.5.1`);<br>- `Test-Ssap3CatalogMember` checks the Authenticode image hash of the `.sys` and the hash of the `.inf`;<br>- `Test-Ssap3DriverInfIdentity` requires SSAP3's provider, service and Apple AAP/UARP hardware IDs only.<br>Used by packaging and by Setup.<br>Tested on 85 real driver catalogs on the development PC: 79 WHQL and 1 attestation accepted, 5 third-party-signed refused, 67/67 image hashes matched, a one-bit code change detected, and a renamed foreign attestation-signed package refused by the INF identity check. CI adds a self-signed certificate named like Microsoft's publisher, which is refused (`driver/Test-SigningPipeline.ps1`). |
+| S-35 | Medium | Independent review of the driver before signing (no critical or high findings) | **Fixed in source (built, image-checked and CodeQL-clean in CI run #29; not yet run on hardware)** | Changes:<br>- close-channel BRBs are sent with `WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE`, so closes from ReleaseHardware or cleanup reach the Bluetooth stack instead of timing out in a stopped target;<br>- `FILE_DEVICE_SECURE_OPEN` is set explicitly;<br>- **protocol v4**: IOCTLs require `FILE_READ_ACCESS` (status, read) or `FILE_WRITE_ACCESS` (open, close, send), so a read-only handle can no longer drive the device (codes checked at compile time);<br>- parked sessions are counted and capped at 4 (completes S-05);<br>- CLOSE reports success once the session is destroyed;<br>- READ requires the full 2582-byte buffer (no head-of-queue stall);<br>- outbound packets are pinned to the exact handshake, feature-flag, notification and control-command packets SSAP3 sends (completes S-09; a C# mirror is tested against every packet the app emits);<br>- size checks for the open/close structures, and IRQL annotations.<br>**Not changed (documented):** the session lock is still held across the 10 s open-channel request, so an interactive user can delay other session operations on the same device by up to 10 s. |
 | S-33 | Info | New data in the DSP: measured HRIR responses (MIT KEMAR) for the convolution renderer | **No new runtime input (by design). Compiled `/W4 /WX /guard:cf` and CodeQL-clean in CI run #19** | Nothing is loaded or parsed in `audiodg.exe`. The offline converter (`tools/hrtf/HrirTableBuilder`, developer PC only) validates the source set, which it reads from a SHA-256-pinned archive, and emits a C++ header that is compiled in as constant data. In the engine:<br>- `static_assert`s check the table's layout (ring order, azimuth range 0–180), and that the longest convolution window (onset bound × 384 kHz + 512 taps) fits the masked 32 768-sample history;<br>- every index is clamped or masked;<br>- the per-block filter build uses fixed-size stack arrays, with no allocation, locks or I/O;<br>- the kernel table is computed only on the dispatcher thread when the sample rate changes.<br>Engine 2.7.0 adds:<br>- the renderer field (offset 20, formerly reserved): only 0 or 1 is accepted, and any other value rejects the whole record;<br>- the stage-EQ biquads, designed on the dispatcher thread; any filter at or above 0.45 × the rate, or with an implausible gain, is skipped; the IIR state is included in the finite-state check that resets the filters.<br>Otherwise the shared-state validation (S-04) is unchanged. |
 
 No **critical or high** finding is open in source. Several fixes are **not
@@ -64,7 +66,7 @@ release-verified, and a production release stays blocked.
 | AACP packets from the AirPods (≤ 2582 B) | Kernel queues them without interpreting them; user mode parses them, including protobuf on the sensor channel | Strict total parsers, randomized tests, bounded queue of 16 (oldest dropped) |
 | Commands user mode asks the driver to send (≤ 512 B) | Any interactive user on this PC | Opcode allowlist; `0x17` limited to sensor start/stop with a bounded interval (S-29) |
 | BLE advertisements from any nearby device | User-mode parser | 255-byte cap, total parser, model and RSSI filter |
-| Driver IOCTL interface | Interactive users only | 5 IOCTLs, size and ownership checks, session caps, allowlist, timeouts |
+| Driver IOCTL interface | Interactive users only | 5 IOCTLs with I/O-manager access checks (protocol v4: read for status/read, write for open/close/send); size and ownership checks; session and parked-session caps; exact outbound packet allowlist; timeouts |
 | Shared state file | Interactive users write; `audiodg` reads | Protected ACL (no create or delete); DSP validation; seqlock |
 | HRIR data | None at run time: compiled into the engine DLL as constant data | Generated offline from a hash-pinned archive; layout and bounds checked at compile time (S-33) |
 | Settings JSON (per user) | Same user | 64 KiB cap, typed deserialisation, range validation |
@@ -153,11 +155,26 @@ after setup.
   - Microsoft's `microsoft/windows-drivers` 1.10.0 CodeQL pack: the
     recommended suite goes to code scanning, and any must-fix result fails
     CI.
+- **Independent review (2026-11-14):** a separate reviewer read every
+  driver source file and the INF. It found nothing critical or high. It
+  confirmed:
+  - buffer aliasing handling and zeroed outputs (no kernel memory reaches
+    user mode);
+  - exact byte counts and single completion of every request;
+  - the reader stop handshake, and DISPATCH-safe DDIs on the DPC and
+    completion paths;
+  - NonPagedPoolNx with tags;
+  - an INF that would not block attestation.
+
+  Its medium and low findings are fixed (S-35).
 - **Open items:**
   - Driver Verifier and runtime HVCI testing on hardware (this PC has
     Memory Integrity on);
   - attestation signing, which needs an organization and an EV certificate
-    (`driver/SIGNING.md`).
+    (`driver/SIGNING.md`);
+  - two review items that need hardware to settle: how KMDF treats the
+    default target at ReleaseHardware, and whether the Bluetooth stack
+    honours cancel for open-channel requests.
 
 ## 8. Installer and uninstaller review (source)
 

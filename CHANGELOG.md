@@ -2,6 +2,33 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Driver signing readiness** (`driver/SIGNING.md`,
+  `docs/DRIVER_TEST_REPORT.md`). Microsoft's signature itself still needs
+  the maintainer's organization, EV certificate and Partner Center account.
+  - **Stricter signature rule** in packaging and Setup:
+    - the root is pinned to Microsoft;
+    - the driver-publisher EKU is required;
+    - the `.sys` and `.inf` must be exactly the signed files;
+    - the INF must be SSAP3's own.
+
+    Tested on real WHQL and attestation catalogs; CI tests unsigned,
+    tampered and spoofed-publisher packages.
+  - `installer\Test-Ssap3Driver.ps1`: a read-only driver health check. It
+    reports signature, system security, install, device state, control
+    interface and head-tracking freshness, each level separately.
+  - `driver\Sign-AttestationCab.ps1`: EV signing of the submission CAB.
+  - Setup and uninstall now say when Windows needs a restart to finish a
+    driver change.
+  - **Driver protocol v4**, after an independent review with no critical
+    or high findings:
+    - access-checked IOCTLs;
+    - an exact outbound packet allowlist;
+    - capped parked sessions;
+    - close requests that reach the Bluetooth stack during device stop;
+    - `FILE_DEVICE_SECURE_OPEN`;
+    - read-buffer and CLOSE fixes;
+    - IRQL annotations.
+
 - **Spatial engine 2.7.0: timbre correction and a renderer choice**, after a
   listening test of 2.6.0. On AirPods Pro 3, the measured renderer sounded
   thin, harsh or muffled, and spatially wrong. Measurement confirmed it:
