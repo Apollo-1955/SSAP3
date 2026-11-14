@@ -52,7 +52,7 @@ The status legend:
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
-| Measured-HRIR renderer (KEMAR table, offline converter, crossfaded updates) | ✓ | design checked offline (C# port of the algorithm on the generated table); C++ build and tests run in CI | ✗ (no MSVC locally; the new DLL is not installed) | — (the installed engine is still the parametric build) |
+| Measured-HRIR renderer (KEMAR table, offline converter, crossfaded updates) | ✓ | ✓ design checked offline (C# port on the generated table); **CI run #19: `/W4 /WX` build, CodeQL clean, all HRIR, click and real-time tests pass** (`docs/TECHNICAL_REPORT.md` §5.3) | ✗ (no MSVC locally; the new DLL is not installed) | — (the installed engine is still the parametric build) |
 | Driver (C) | ✓ | compiles, links, passes InfVerif, the HVCI image checks, Microsoft's driver CodeQL suites and Inf2Cat; submission CAB built (CI run #12). Not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
 | Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; the app writes fresh state (≈200 ms old, engine limit 750 ms) | **Fixed mode ✓:** the user heard a clear difference between Off and Fixed on AirPods Pro 3 (subjective listening test, 2026-11-13; state record confirmed `Mode=Fixed`). Tracked mode not verified (needs the signed AAP driver) |
@@ -71,6 +71,9 @@ The status legend:
 | #9–#11 | `99555e1`–`dcf93eb` | New driver pre-submission jobs, fixed one by one:<br>- source scan read a build folder;<br>- the `microsoft/cpp-queries` dependency wasn't downloaded;<br>- no PDB was produced (now `/Z7` + `/DEBUG`);<br>- the CAB check misread `expand -D` output;<br>- 2 role-type warnings. |
 | #12 | `7da096c` | **All jobs green**, including driver image checks, Microsoft's driver CodeQL suites (0 must-fix, 0 recommended), Inf2Cat and the attestation CAB artifact. |
 | #16 | `4c4d99d` | **All jobs green** with the motion providers, tracking states, pitch/roll calibration, companion protocol and new UI (186 tests). |
+| #18 | `d93db80` | HRIR renderer. The engine failed to compile: a `static_assert` assumed every KEMAR ring ends at 180°, but the 50° ring ends at 176°. The lookup now bridges 176–184° with the mirror image (no seam behind the head). Build diagnostics are now published as annotations. |
+| #19 | `40f968f` | Spatial engine and CodeQL C/C++ **green**, with every HRIR, click and real-time test passing. The managed tests failed on a pre-existing flaky test: the pairing-code check failed for the ~19 % of random keys whose code has no `A`. Fixed and made deterministic; failed tests are now named in annotations. |
+| #20 | `7515eff` | **All jobs green** with the measured-HRIR renderer, including spatial-engine tests and CodeQL (C/C++, C#, driver). Engine measurements were identical to #19; real-time factor 0.013. |
 | #14 | `99ed229` | **All jobs green** after the motion-protocol rewrite and driver protocol v3. Covers MTU 2582, the `0x17` allowlist and the structure-size checks. Results: 158 tests pass, Microsoft's driver CodeQL suites are clean, and the attestation CAB was rebuilt. |
 
 ## Blockers (need the maintainer)

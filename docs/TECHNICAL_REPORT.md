@@ -161,13 +161,29 @@ parametric model (ITD, level and low-pass approximations).
 Cost at 48 kHz: four 106-tap FIRs per sample (eight during a crossfade),
 SSE, plus about 10 000 multiply-adds per filter rebuild.
 
+In CI (run #19), with the head turning continuously in 10 ms blocks, the
+engine used **1.3 % of one core**. In the same run:
+
+- the full renderer (room on) was **4.4 dB below the input** for broadband
+  noise;
+- a head sweep plus two abrupt jumps stepped the output by **0.998×** the
+  largest step of a stationary head (limit 1.3×);
+- **no clicks** were detected.
+
 ### 5.3 Measured cues
 
 These are interaural level difference (ILD, right minus left) and time
 difference (ITD, onset at 15 % of peak) of the rendered responses, at
-48 kHz. The values come from the design check, a C# port of the same
-algorithm run on the generated table. CI asserts ranges around them in
-`spatializer_smoke.cpp`.
+48 kHz.
+
+- The table comes from the design check: a C# port of the same algorithm,
+  run on the generated table.
+- The C++ engine measured itself in CI (run #19, `spatializer_smoke.cpp`)
+  and agreed to the reported precision:
+  - -30°: ILD -9.49 dB, ITD -0.229 ms;
+  - -90°: ILD -14.86 dB, ITD -0.688 ms;
+  - front/back: 4.93 dB.
+- CI asserts ranges around these values.
 
 | Head-relative direction | ILD | ITD (right ear leads) |
 | --- | --- | --- |
