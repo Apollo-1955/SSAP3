@@ -13,23 +13,11 @@
 
 #include <bthioctl.h>
 
-static
-VOID
-Ssap3ReaderResubmitDpc(
-    _In_ struct _KDPC* Dpc,
-    _In_opt_ PVOID DeferredContext,
-    _In_opt_ PVOID SystemArgument1,
-    _In_opt_ PVOID SystemArgument2
-    );
-
-static
-VOID
-Ssap3ReaderCompletion(
-    _In_ WDFREQUEST Request,
-    _In_ WDFIOTARGET Target,
-    _In_ PWDF_REQUEST_COMPLETION_PARAMS Params,
-    _In_ WDFCONTEXT Context
-    );
+/* Declared with their WDK role types so Code Analysis, SDV and Microsoft's
+ * driver CodeQL queries (cpp/drivers/role-type-correctly-used) know their
+ * IRQL and calling contract. */
+static KDEFERRED_ROUTINE Ssap3ReaderResubmitDpc;
+static EVT_WDF_REQUEST_COMPLETION_ROUTINE Ssap3ReaderCompletion;
 
 static
 BOOLEAN

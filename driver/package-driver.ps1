@@ -69,10 +69,23 @@ if ($AttestationCab) {
     if ($LASTEXITCODE -ne 0) { throw "makecab failed with exit code $LASTEXITCODE." }
 
     $cab = Join-Path $root 'ssap3aap.cab'
-    $listing = & (Join-Path $env:SystemRoot 'System32\expand.exe') -D $cab
+    # Read the stored paths from the CAB's CFFILE records ("expand -D" drops the
+    # folder, and the folder layout is exactly what Partner Center checks).
+    $bytes = [IO.File]::ReadAllBytes($cab)
+    if ([Text.Encoding]::ASCII.GetString($bytes, 0, 4) -ne 'MSCF') { throw 'makecab did not produce a cabinet file.' }
+    $offset = [int][BitConverter]::ToUInt32($bytes, 16)
+    $fileCount = [BitConverter]::ToUInt16($bytes, 28)
+    $entries = @()
+    for ($i = 0; $i -lt $fileCount; $i++) {
+        $nameStart = $offset + 16
+        $nameEnd = [Array]::IndexOf($bytes, [byte]0, $nameStart)
+        $entries += [Text.Encoding]::ASCII.GetString($bytes, $nameStart, $nameEnd - $nameStart)
+        $offset = $nameEnd + 1
+    }
     $expected = 'ssap3aap\ssap3aap.cat', 'ssap3aap\ssap3aap.inf', 'ssap3aap\ssap3aap.pdb', 'ssap3aap\ssap3aap.sys'
-    foreach ($entry in $expected) {
-        if (-not ($listing | Where-Object { $_ -match [regex]::Escape($entry) })) { throw "The CAB is missing $entry." }
+    $actual = @($entries | Sort-Object)
+    if (($actual -join '|') -ne ($expected -join '|')) {
+        throw "Unexpected CAB layout: $($actual -join ', ') (expected $($expected -join ', '))."
     }
     Remove-Item -LiteralPath $ddf, (Join-Path $root 'setup.inf'), (Join-Path $root 'setup.rpt') -Force -ErrorAction SilentlyContinue
     $hash = (Get-FileHash -LiteralPath $cab -Algorithm SHA256).Hash
