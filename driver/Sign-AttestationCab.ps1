@@ -112,7 +112,9 @@ if (-not $SkipTimestamp) { $arguments += @('/tr', $TimestampUrl, '/td', 'SHA256'
 $arguments += $CabPath
 Write-Output "Signing with $SignToolPath ..."
 & $SignToolPath @arguments
-if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with exit code $LASTEXITCODE." }
+# signtool: 0 = success, 2 = success with warnings, 1 = failure. The signature
+# itself is checked below either way.
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) { throw "signtool sign failed with exit code $LASTEXITCODE." }
 
 $signed = Get-AuthenticodeSignature -LiteralPath $CabPath
 if ($null -eq $signed.SignerCertificate -or $signed.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) { throw 'The CAB does not carry the expected signature after signing.' }

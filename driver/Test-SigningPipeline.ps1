@@ -46,9 +46,23 @@ function Check([bool]$Condition, [string]$Message) {
     if ($Condition) { Write-Output "PASS  $Message" } else { Write-Output "FAIL  $Message"; $failures.Add($Message) }
 }
 
+# Runs a native command and captures stdout and stderr as text. Windows
+# PowerShell 5.1 turns native stderr into terminating errors under 'Stop',
+# and the refusals tested here are written to stderr on purpose.
+function Invoke-Native([string]$FilePath, [string[]]$Arguments) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $FilePath @Arguments 2>&1 | ForEach-Object { "$_" }
+        return [pscustomobject]@{ Exit = $LASTEXITCODE; Lines = @($output) }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
 function Invoke-Verifier([string]$PackageFolder) {
-    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $verifier -Package $PackageFolder 2>&1 | ForEach-Object { "$_" }
-    return [pscustomobject]@{ Exit = $LASTEXITCODE; Lines = @($output) }
+    return Invoke-Native 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $verifier, '-Package', $PackageFolder)
 }
 
 function Find-Line($Run, [string]$Pattern) { return [bool]($Run.Lines | Where-Object { $_ -match $Pattern }) }
@@ -106,8 +120,8 @@ try {
     $spoofed = Join-Path $work 'spoofed'
     New-Item -ItemType Directory -Force -Path $spoofed | Out-Null
     Copy-Item -Path (Join-Path $Stage 'ssap3aap.*') -Destination $spoofed
-    & $signTool sign /fd SHA256 /sha1 $spoof.Thumbprint (Join-Path $spoofed 'ssap3aap.cat') | Out-Null
-    Check ($LASTEXITCODE -eq 0) 'spoof catalog signed for the test'
+    $spoofSign = Invoke-Native $signTool @('sign', '/fd', 'SHA256', '/sha1', $spoof.Thumbprint, (Join-Path $spoofed 'ssap3aap.cat'))
+    Check ($spoofSign.Exit -eq 0 -or $spoofSign.Exit -eq 2) 'spoof catalog signed for the test'
     $spoofSignature = Get-Ssap3CatalogSignature -CatalogPath (Join-Path $spoofed 'ssap3aap.cat')
     Check ($spoofSignature.Kind -eq 'NotTrusted') "spoofed publisher name rejected (classified $($spoofSignature.Kind))"
     Check (-not (Test-Ssap3DriverProductionSigned -CatalogPath (Join-Path $spoofed 'ssap3aap.cat') -MemberPaths @((Join-Path $spoofed 'ssap3aap.sys')))) 'Setup refuses the spoofed package'
@@ -117,13 +131,16 @@ try {
     $cabCopy = Join-Path $work 'ssap3aap.cab'
     Copy-Item -LiteralPath $Cab -Destination $cabCopy
     Copy-Item -LiteralPath "$Cab.sha256" -Destination "$cabCopy.sha256"
-    $refused = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Sign-AttestationCab.ps1') -CabPath $cabCopy -CertificateThumbprint $rehearsal.Thumbprint -TimestampUrl 'http://timestamp.invalid' -SignToolPath $signTool 2>&1 | ForEach-Object { "$_" }
-    Check ($LASTEXITCODE -ne 0 -and ($refused -join ' ') -match 'not an EV code-signing certificate') 'signing helper refuses a non-EV certificate'
+    $helper = Join-Path $PSScriptRoot 'Sign-AttestationCab.ps1'
+    $refused = Invoke-Native 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-CabPath', $cabCopy,
+        '-CertificateThumbprint', $rehearsal.Thumbprint, '-TimestampUrl', 'http://timestamp.invalid', '-SignToolPath', $signTool)
+    Check ($refused.Exit -ne 0 -and ($refused.Lines -join ' ') -match 'not an EV code-signing certificate') 'signing helper refuses a non-EV certificate'
     Check ((Get-AuthenticodeSignature -LiteralPath $cabCopy).Status -eq 'NotSigned') 'refused run left the CAB unsigned'
-    $signedRun = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Sign-AttestationCab.ps1') -CabPath $cabCopy -CertificateThumbprint $rehearsal.Thumbprint -SignToolPath $signTool -AllowNonEvCertificate -SkipTimestamp 2>&1 | ForEach-Object { "$_" }
-    $signedRun | ForEach-Object { Write-Output "      $_" }
+    $signedRun = Invoke-Native 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-CabPath', $cabCopy,
+        '-CertificateThumbprint', $rehearsal.Thumbprint, '-SignToolPath', $signTool, '-AllowNonEvCertificate', '-SkipTimestamp')
+    $signedRun.Lines | ForEach-Object { Write-Output "      $_" }
     $cabSignature = Get-AuthenticodeSignature -LiteralPath $cabCopy
-    Check ($LASTEXITCODE -eq 0 -and $null -ne $cabSignature.SignerCertificate -and $cabSignature.SignerCertificate.Thumbprint -eq $rehearsal.Thumbprint) 'signing helper signs the CAB with the chosen certificate'
+    Check ($signedRun.Exit -eq 0 -and $null -ne $cabSignature.SignerCertificate -and $cabSignature.SignerCertificate.Thumbprint -eq $rehearsal.Thumbprint) 'signing helper signs the CAB with the chosen certificate'
 
     # 5. A genuinely Microsoft-signed package on this runner, if any.
     $production = $null
