@@ -53,10 +53,12 @@ $script:TrustedSids = @($script:SidSystem, $script:SidAdministrators, $script:Si
 $script:FileWriteMask = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
 $script:RegistryWriteMask = [int64](0x2 -bor 0x4 -bor 0x20 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
 
+# Writes to the host, never to the output stream: functions that log and then
+# return a value (Install-Ssap3Driver) would otherwise return an array.
 function Write-Ssap3Log {
     param([Parameter(Mandatory = $true)][string]$Message)
     $line = '{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $Message
-    Write-Output $line
+    Write-Host $line
     if (Test-Path -LiteralPath $script:SetupRoot -PathType Container) {
         Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
     }
