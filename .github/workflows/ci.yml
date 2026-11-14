@@ -109,12 +109,85 @@ jobs:
             exit $code
           }
 
+      - name: Driver image checks (HVCI-relevant PE properties, non-executable pool only)
+        shell: pwsh
+        run: |
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\Test-DriverImage.ps1 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          $log | Where-Object { $_ -like 'FAIL*' } | ForEach-Object { Write-Output "::error title=Driver image check::$_" }
+          exit $code
+
+      - name: Attestation submission CAB (unsigned; the maintainer signs it with an EV certificate)
+        shell: pwsh
+        run: |
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\package-driver.ps1 -AttestationCab 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          if ($code -ne 0) {
+            $text = (($log | Select-Object -Last 20) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Attestation CAB failed::$text"
+            exit $code
+          }
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ssap3-driver-unsigned
           path: |
             driver/Ssap3Aap/bin-msvc/ssap3aap.sys
             driver/Ssap3Aap/bin-msvc/ssap3aap.pdb
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ssap3-driver-attestation-cab-unsigned
+          path: |
+            artifacts/attestation/ssap3aap.cab
+            artifacts/attestation/ssap3aap.cab.sha256
+          if-no-files-found: error
+
+  codeql-driver:
+    # Microsoft's Windows driver CodeQL queries (the WHCP 26H1 pack). The
+    # recommended suite is uploaded to code scanning; any must-fix result fails
+    # the job, because it would also fail Microsoft's Static Tools Logo test.
+    name: CodeQL (driver, Microsoft windows-drivers queries)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore pinned WDK packages
+        run: dotnet restore driver/WdkPackages.proj
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        id: init
+        with:
+          languages: c-cpp
+          build-mode: manual
+          packs: microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls
+      - name: Build driver for analysis
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\build-driver-msvc.ps1
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: driver
+      - name: Gate on Microsoft must-fix driver queries
+        shell: pwsh
+        run: |
+          $codeql = '${{ steps.init.outputs.codeql-path }}'
+          $database = Join-Path $env:RUNNER_TEMP 'codeql_databases\cpp'
+          & $codeql database analyze $database 'microsoft/windows-drivers@1.10.0:windows-driver-suites/mustfix.qls' --download --format=sarifv2.1.0 --output=mustfix.sarif --threads=0
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=CodeQL must-fix analysis::codeql exited with $LASTEXITCODE"; exit 1 }
+          $sarif = Get-Content -LiteralPath mustfix.sarif -Raw | ConvertFrom-Json
+          $results = @($sarif.runs | ForEach-Object { if ($_.PSObject.Properties['results']) { $_.results } })
+          foreach ($result in $results) {
+            $location = $result.locations[0].physicalLocation
+            Write-Output "::error file=$($location.artifactLocation.uri),line=$($location.region.startLine),title=$($result.ruleId)::$($result.message.text)"
+          }
+          Write-Output "Must-fix results: $($results.Count)"
+          if ($results.Count -gt 0) { exit 1 }
 
   scripts:
     name: Installer and tooling script checks

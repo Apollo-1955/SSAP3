@@ -66,9 +66,16 @@ The status legend:
 
 ## Blockers (need the maintainer)
 
-1. **Microsoft attestation signing** for `ssap3aap.sys`: EV certificate plus
-   Partner Center. Without it the AAP features cannot run on a Secure Boot
-   PC, by design.
+1. **Microsoft attestation signing** for `ssap3aap.sys`. Without it the AAP
+   features (head tracking, listening modes, AACP battery) cannot run on a
+   Secure Boot PC, by design. The maintainer needs:
+   - a registered organization;
+   - an EV code-signing certificate;
+   - a Windows Hardware Developer Program account.
+
+   CI now builds the submission CAB (`ssap3-driver-attestation-cab-unsigned`)
+   and gates it on driver image checks and Microsoft's must-fix driver CodeQL
+   queries. Steps are in `driver/SIGNING.md`.
 2. **Hardware validation:** turn Bluetooth on and run
    `SSAP3-TransportProbe --ble 30` to confirm model ID `0x2720`. AACP and
    motion tests need the signed driver, or a separate development PC

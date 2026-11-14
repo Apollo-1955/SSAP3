@@ -36,22 +36,51 @@ foreach ($required in @($sys, $inf)) {
 }
 
 if ($AttestationCab) {
+    # Layout required by Partner Center attestation signing (learn.microsoft.com,
+    # "Attestation sign Windows drivers"): one driver per subfolder, no files at the
+    # CAB root, folder name under 40 characters, and the SYS, INF, PDB (needed for
+    # Microsoft's crash analysis) and a CAT. Microsoft replaces the CAT with its own
+    # signed catalog; ours is unsigned and only satisfies the package format.
+    if (-not (Test-Path -LiteralPath $pdb)) { throw "Partner Center needs the symbol file: $pdb is missing." }
+    if (-not (Test-Path -LiteralPath $inf2Cat)) {
+        $found = Get-ChildItem -LiteralPath $wdk -Recurse -Filter 'Inf2Cat.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $found) { throw "Inf2Cat.exe was not found in the WDK package ($wdk). Run: dotnet restore driver\WdkPackages.proj" }
+        $inf2Cat = $found.FullName
+    }
     $root = Join-Path $repositoryRoot 'artifacts\attestation'
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
     $stage = Join-Path $root 'ssap3aap'
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item -LiteralPath $sys, $inf -Destination $stage -Force
-    if (Test-Path -LiteralPath $pdb) { Copy-Item -LiteralPath $pdb -Destination $stage -Force }
+    Copy-Item -LiteralPath $sys, $inf, $pdb -Destination $stage -Force
+    & $inf2Cat "/driver:$stage" /os:10_VB_X64,10_CO_X64,10_NI_X64,10_GE_X64
+    if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed with exit code $LASTEXITCODE." }
+    if (-not (Test-Path -LiteralPath (Join-Path $stage 'ssap3aap.cat'))) { throw 'Inf2Cat did not produce ssap3aap.cat.' }
+
     $ddf = Join-Path $root 'ssap3aap.ddf'
     $lines = @(
         '.OPTION EXPLICIT', '.Set CabinetFileCountThreshold=0', '.Set FolderFileCountThreshold=0',
         '.Set FolderSizeThreshold=0', '.Set MaxCabinetSize=0', '.Set MaxDiskFileCount=0', '.Set MaxDiskSize=0',
         '.Set CompressionType=MSZIP', '.Set Cabinet=on', '.Set Compress=on',
         '.Set CabinetNameTemplate=ssap3aap.cab', ".Set DiskDirectoryTemplate=$root", '.Set DestinationDir=ssap3aap')
-    $lines += Get-ChildItem -LiteralPath $stage -File | ForEach-Object { '"{0}"' -f $_.FullName }
+    $lines += Get-ChildItem -LiteralPath $stage -File | Sort-Object Name | ForEach-Object { '"{0}"' -f $_.FullName }
     $lines | Set-Content -LiteralPath $ddf -Encoding ASCII
-    & (Join-Path $env:SystemRoot 'System32\makecab.exe') /f $ddf | Out-Null
+    Push-Location $root
+    try { & (Join-Path $env:SystemRoot 'System32\makecab.exe') /f $ddf | Out-Null } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw "makecab failed with exit code $LASTEXITCODE." }
-    Write-Output "Attestation CAB: $(Join-Path $root 'ssap3aap.cab'). Sign it with the EV certificate, then submit it in Partner Center."
+
+    $cab = Join-Path $root 'ssap3aap.cab'
+    $listing = & (Join-Path $env:SystemRoot 'System32\expand.exe') -D $cab
+    $expected = 'ssap3aap\ssap3aap.cat', 'ssap3aap\ssap3aap.inf', 'ssap3aap\ssap3aap.pdb', 'ssap3aap\ssap3aap.sys'
+    foreach ($entry in $expected) {
+        if (-not ($listing | Where-Object { $_ -match [regex]::Escape($entry) })) { throw "The CAB is missing $entry." }
+    }
+    Remove-Item -LiteralPath $ddf, (Join-Path $root 'setup.inf'), (Join-Path $root 'setup.rpt') -Force -ErrorAction SilentlyContinue
+    $hash = (Get-FileHash -LiteralPath $cab -Algorithm SHA256).Hash
+    "$hash *ssap3aap.cab" | Set-Content -LiteralPath "$cab.sha256" -Encoding ASCII
+    Write-Output "Attestation CAB (unsigned): $cab"
+    Write-Output "Contents: $($expected -join ', ')"
+    Write-Output "SHA-256: $hash"
+    Write-Output 'Next: sign it with your EV certificate and submit it in Partner Center (driver\SIGNING.md).'
     return
 }
 

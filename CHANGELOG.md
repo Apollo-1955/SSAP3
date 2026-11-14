@@ -2,6 +2,23 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Driver signing preparation:**
+  - CI builds the Partner Center attestation CAB
+    (`ssap3-driver-attestation-cab-unsigned`), with `.sys`, `.inf`, `.pdb`
+    and an Inf2Cat catalog in one `ssap3aap\` folder.
+  - CI runs `driver/Test-DriverImage.ps1`, which checks the HVCI-relevant PE
+    properties and that only non-executable pool is used.
+  - CI runs Microsoft's Windows driver CodeQL queries (WHCP 26H1 pack
+    1.10.0) and fails on any must-fix result.
+  - `driver/SIGNING.md` walks the maintainer through the EV certificate,
+    Hardware Developer Program registration, signing, submission and first
+    install.
+- **Fixed-mode soundstage verified** on the development PC with AirPods Pro
+  3. Installed with `Install-SSAP3Local.ps1`, now with a transcript at
+  `artifacts\install-local.log`. Two installer bugs found by that first run
+  are fixed: `$PSScriptRoot` in parameter defaults, and the setup log writing
+  into function return values.
+
 - **Spatial engine on an existing Equalizer APO:** the engine task can now
   use an Equalizer APO 1.4.2 that you installed with its official installer,
   instead of a bundled copy. It hardens that install:

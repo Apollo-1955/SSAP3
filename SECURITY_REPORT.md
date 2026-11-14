@@ -130,11 +130,23 @@ after setup.
 - Device removal: sessions are closed before the profile interface is
   dereferenced. Sessions whose reader cannot be confirmed stopped are parked
   and freed at device cleanup, never freed early.
+- **Static pre-submission checks (in CI):**
+  - `driver/Test-DriverImage.ps1` checks the HVCI-relevant image properties:
+    - page-aligned sections and no writable+executable section;
+    - NX, CFG and ASLR flags;
+    - kernel-only imports;
+    - non-executable pool only in the sources.
+
+    The checker was validated on Windows' own `null.sys`, `beep.sys` and
+    `wdf01000.sys`, and it rejects a user-mode DLL.
+  - Microsoft's `microsoft/windows-drivers` 1.10.0 CodeQL pack: the
+    recommended suite goes to code scanning, and any must-fix result fails
+    CI.
 - **Open items:**
-  - Driver Verifier and HVCI-compatibility testing on hardware (this PC has
-    Memory Integrity on, so a signed driver must be HVCI-compatible);
-  - running Microsoft's Windows driver CodeQL queries;
-  - attestation signing.
+  - Driver Verifier and runtime HVCI testing on hardware (this PC has
+    Memory Integrity on);
+  - attestation signing, which needs an organization and an EV certificate
+    (`driver/SIGNING.md`).
 
 ## 8. Installer and uninstaller review (source)
 
