@@ -52,3 +52,10 @@ if ($testExit -ne 0) {
     Write-Error "Spatializer smoke test failed with code $testExit." -ErrorAction Continue
     exit 1
 }
+
+# Publish the measured values (ILD/ITD, loudness, click ratio, real-time
+# factor) as a notice annotation, readable without signing in to the log.
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    $summary = ($testOutput | Where-Object { "$_".Trim() }) -join ' | '
+    Write-Output "::notice title=Spatializer results::$($summary.Replace('%', '%25'))"
+}

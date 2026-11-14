@@ -56,7 +56,11 @@ $pdb = Join-Path $binaryRoot 'SSAP3Spatializer.pdb'
 $sdkInclude = Join-Path $sdkRoot "Include\$sdkVersion"
 $sdkLib = Join-Path $sdkRoot "Lib\$sdkVersion"
 
-& $compiler `
+# Diagnostics are captured as text (Windows PowerShell 5.1 would turn native
+# stderr into terminating errors) and, on GitHub Actions, also published as an
+# ::error annotation so a failure is readable without signing in to the log.
+$ErrorActionPreference = 'Continue'
+$compilerOutput = & $compiler `
     /nologo /c /std:c++20 /O2 /Oi /GL /GS /guard:cf /EHsc /W4 /WX `
     /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX `
     "/I$sourceRoot" `
@@ -65,9 +69,19 @@ $sdkLib = Join-Path $sdkRoot "Lib\$sdkVersion"
     "/I$(Join-Path $sdkInclude 'shared')" `
     "/I$(Join-Path $sdkInclude 'um')" `
     "/Fo$object" `
-    $source
-if ($LASTEXITCODE -ne 0) {
-    throw "cl.exe failed with exit code $LASTEXITCODE."
+    $source 2>&1 | ForEach-Object { "$_" }
+$compilerExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+$compilerOutput | ForEach-Object { Write-Output $_ }
+if ($compilerExit -ne 0) {
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        $diagnostics = @($compilerOutput | Where-Object { $_ -match '(error|warning) [A-Z]+\d+' })
+        if ($diagnostics.Count -eq 0) { $diagnostics = @($compilerOutput | Select-Object -Last 20) }
+        $text = (($diagnostics | Select-Object -First 25) | ForEach-Object { $_ -replace '^\s*[A-Za-z]:\\(?:[^\\(]+\\)*', '' }) -join "`n"
+        $escaped = $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+        Write-Output "::error title=Spatial engine compile failed::$escaped"
+    }
+    throw "cl.exe failed with exit code $compilerExit."
 }
 
 & $linker `

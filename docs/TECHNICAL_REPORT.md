@@ -127,6 +127,11 @@ parametric model (ITD, level and low-pass approximations).
    four measurements.
    - The left half is the mirror image with the ears swapped. KEMAR's median
      plane is identical for both ears, so there is no seam at 0° or 180°.
+   - The 50° ring is measured every 8°, so its right half stops at 176°.
+     Between 176° and 184° the lookup blends the 176° response with its
+     mirror image; at 180° each counts half.
+   - A seam probe over the whole sphere (every elevation, both ears, a
+     0.01° step every 0.25°) changes a filter by at most 0.8 %.
    - Below -40° there are no measurements; those directions use the -40°
      ring.
 2. **Blend.** The four onset-aligned responses are blended, and their onsets

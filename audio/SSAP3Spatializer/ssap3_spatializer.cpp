@@ -93,8 +93,11 @@ static_assert([]() constexpr
     {
         const int begin = hrir::kRingStart[ring];
         const int end = hrir::kRingStart[ring + 1];
+        // Rings start on the median plane (0). They end at 180, or just short
+        // of it when the spacing does not divide 180 (the 50-degree ring ends
+        // at 176); the lookup bridges that gap with the mirror image.
         if (end <= begin || hrir::kAzimuth[begin] != 0 ||
-            (end - begin > 1 && hrir::kAzimuth[end - 1] != 180) ||
+            (end - begin > 1 && (hrir::kAzimuth[end - 1] <= 90 || hrir::kAzimuth[end - 1] > 180)) ||
             (ring > 0 && hrir::kRingElevation[ring] <= hrir::kRingElevation[ring - 1]))
         {
             return false;
@@ -110,7 +113,7 @@ static_assert([]() constexpr
     }
 
     return true;
-}(), "The HRIR table must list rings by rising elevation, each from azimuth 0 to 180.");
+}(), "The HRIR table must list rings by rising elevation, each from azimuth 0 to (at most) 180.");
 
 // Onsets are stored relative to the earliest one, which only removes a
 // common delay.
@@ -164,10 +167,10 @@ struct DirectionWeights
 {
     std::array<int, kMaxDirectionWeights> entry{};
     std::array<float, kMaxDirectionWeights> weight{};
+    // KEMAR is measured on the right half. A measurement used for a point on
+    // the left is its mirror image: the same entry with the ears swapped.
+    std::array<bool, kMaxDirectionWeights> swapEars{};
     int count = 0;
-    // KEMAR is measured on the right half; a source on the left uses the
-    // mirror-image measurement with the ears swapped.
-    bool mirrored = false;
 };
 
 struct Quaternion
@@ -303,19 +306,21 @@ Vector3 SpeakerDirection(float azimuthDegrees, float elevationDegrees)
         std::sin(elevation)};
 }
 
-void AddWeight(DirectionWeights& weights, int entry, float weight)
+void AddWeight(DirectionWeights& weights, int entry, float weight, bool swapEars)
 {
     if (weight > 0.0f && weights.count < kMaxDirectionWeights)
     {
         weights.entry[weights.count] = entry;
         weights.weight[weights.count] = weight;
+        weights.swapEars[weights.count] = swapEars;
         ++weights.count;
     }
 }
 
 // Linear interpolation between the two measured azimuths around `azimuth`
-// (0-180 degrees) on one elevation ring.
-void AddRing(DirectionWeights& weights, int ring, float azimuth, float ringWeight)
+// (0-180 degrees, folded onto the measured half) on one elevation ring.
+// `mirrored` says the point is really on the left.
+void AddRing(DirectionWeights& weights, int ring, float azimuth, bool mirrored, float ringWeight)
 {
     if (!(ringWeight > 0.0f))
     {
@@ -327,7 +332,19 @@ void AddRing(DirectionWeights& weights, int ring, float azimuth, float ringWeigh
     if (end - begin == 1)
     {
         // The zenith is a single measurement.
-        AddWeight(weights, begin, ringWeight);
+        AddWeight(weights, begin, ringWeight, mirrored);
+        return;
+    }
+
+    const float last = static_cast<float>(hrir::kAzimuth[end - 1]);
+    if (azimuth > last)
+    {
+        // Between the ring's last measurement (for example 176) and its
+        // mirror image across 180 (184). At 180 both count half, so the
+        // blend is the same from either side and there is no seam behind.
+        const float fraction = std::clamp((azimuth - last) / (360.0f - 2.0f * last), 0.0f, 0.5f);
+        AddWeight(weights, end - 1, ringWeight * (1.0f - fraction), mirrored);
+        AddWeight(weights, end - 1, ringWeight * fraction, !mirrored);
         return;
     }
 
@@ -340,8 +357,8 @@ void AddRing(DirectionWeights& weights, int ring, float azimuth, float ringWeigh
     const float from = static_cast<float>(hrir::kAzimuth[lower]);
     const float to = static_cast<float>(hrir::kAzimuth[lower + 1]);
     const float fraction = std::clamp((azimuth - from) / (to - from), 0.0f, 1.0f);
-    AddWeight(weights, lower, ringWeight * (1.0f - fraction));
-    AddWeight(weights, lower + 1, ringWeight * fraction);
+    AddWeight(weights, lower, ringWeight * (1.0f - fraction), mirrored);
+    AddWeight(weights, lower + 1, ringWeight * fraction, mirrored);
 }
 
 // Bilinear weights over the measured grid (elevation rings, then azimuth).
@@ -359,9 +376,10 @@ DirectionWeights MeasuredDirectionWeights(const Direction& direction)
         azimuth += 360.0f;
     }
 
-    // The measured median plane is identical for both ears, so the mirror
-    // image meets the measured half without a seam at 0 and 180 degrees.
-    weights.mirrored = azimuth < 0.0f;
+    // Fold the left half onto the measured right half. The measured median
+    // plane is identical for both ears, so the mirror image meets the
+    // measured half without a seam at 0 and 180 degrees.
+    const bool mirrored = azimuth < 0.0f;
     azimuth = std::min(std::abs(azimuth), 180.0f);
 
     const float lowest = static_cast<float>(hrir::kRingElevation[0]);
@@ -376,8 +394,8 @@ DirectionWeights MeasuredDirectionWeights(const Direction& direction)
     const float from = static_cast<float>(hrir::kRingElevation[lower]);
     const float to = static_cast<float>(hrir::kRingElevation[lower + 1]);
     const float fraction = std::clamp((elevation - from) / (to - from), 0.0f, 1.0f);
-    AddRing(weights, lower, azimuth, 1.0f - fraction);
-    AddRing(weights, lower + 1, azimuth, fraction);
+    AddRing(weights, lower, azimuth, mirrored, 1.0f - fraction);
+    AddRing(weights, lower + 1, azimuth, mirrored, fraction);
     return weights;
 }
 
@@ -773,11 +791,11 @@ private:
     {
         std::array<float, hrir::kTaps> measured{};
         float onset = 0.0f;
-        const int sourceEar = weights.mirrored ? 1 - ear : ear;
         for (int index = 0; index < weights.count; ++index)
         {
             const int entry = weights.entry[index];
             const float weight = weights.weight[index];
+            const int sourceEar = weights.swapEars[index] ? 1 - ear : ear;
             const float gain = weight * hrir::kScale;
             const std::int16_t* response = hrir::kResponse[entry][sourceEar];
             for (int tap = 0; tap < hrir::kTaps; ++tap)
