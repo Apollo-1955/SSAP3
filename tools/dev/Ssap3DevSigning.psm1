@@ -175,11 +175,14 @@ function Get-Ssap3DevCertificates([string]$Location = 'CurrentUser', [string]$Na
 
 # Every SSAP3 development certificate anywhere this tool could have put one
 # (or a copy of one), with where it was found.
+# The current user's Root and TrustedPublisher views also show the machine's
+# certificates, so an entry there counts only when the machine store lacks it.
 function Find-Ssap3DevCertificates {
     $found = @()
-    foreach ($place in @('CurrentUser\My', 'CurrentUser\Root', 'CurrentUser\TrustedPublisher', 'LocalMachine\My', 'LocalMachine\Root', 'LocalMachine\TrustedPublisher')) {
+    foreach ($place in @('LocalMachine\My', 'LocalMachine\Root', 'LocalMachine\TrustedPublisher', 'CurrentUser\My', 'CurrentUser\Root', 'CurrentUser\TrustedPublisher')) {
         $location, $name = $place -split '\\'
         foreach ($certificate in Get-Ssap3DevCertificates $location $name) {
+            if ($location -eq 'CurrentUser' -and $name -ne 'My' -and ($found | Where-Object { $_.Store -eq "LocalMachine\$name" -and $_.Thumbprint -eq $certificate.Thumbprint })) { continue }
             $found += [pscustomobject]@{ Store = $place; Thumbprint = $certificate.Thumbprint; NotAfter = $certificate.NotAfter }
         }
     }
@@ -995,9 +998,16 @@ function Get-Ssap3DevRemovalCheck {
         foreach ($pair in @(@('LocalMachine', 'Root', 'machineRoot'), @('LocalMachine', 'TrustedPublisher', 'machineTrustedPublisher'))) {
             $now = @(Get-Ssap3StoreThumbprints $pair[0] $pair[1])
             $then = @($state.snapshot.($pair[2]))
-            $added = @($now | Where-Object { $_ -notin $then })
+            $ours = @(Get-Ssap3DevCertificates $pair[0] $pair[1] | ForEach-Object { $_.Thumbprint })
+            $added = @($now | Where-Object { $_ -notin $then -and $_ -notin $ours })
             $missing = @($then | Where-Object { $_ -notin $now })
-            $lines += $(if ($added.Count -eq 0 -and $missing.Count -eq 0) { "Verified: $($pair[0])\$($pair[1]) matches the snapshot of $($state.snapshot.taken)" } else { "$($pair[0])\$($pair[1]) differs from the snapshot of $($state.snapshot.taken) (+$($added.Count) / -$($missing.Count)); these are not SSAP3 development certificates and were left alone" })
+            $store = "$($pair[0])\$($pair[1])"
+            if ($added.Count -eq 0 -and $missing.Count -eq 0) {
+                $lines += "Verified: $store matches the snapshot of $($state.snapshot.taken)$(if ($ours.Count) { ', apart from the SSAP3 development certificate listed above' })"
+            }
+            else {
+                $lines += "$store differs from the snapshot of $($state.snapshot.taken) by other software (+$($added.Count) / -$($missing.Count)); SSAP3 left those certificates alone"
+            }
         }
     }
     $lines += 'Not verified by this tool: Secure Boot in UEFI (turn it back on yourself if you turned it off) and the state after the next restart (run CheckSystem again then).'
@@ -1038,7 +1048,7 @@ function Read-Ssap3HeadPoseSample([string]$Path) {
 # only when the samples are live, fresh, in Tracked mode, come from the
 # AirPods sensors (the motion source setting) and actually move.
 function Get-Ssap3TrackingSummary {
-    param([Parameter(Mandatory = $true)][object[]]$Samples, [string]$MotionSource)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Samples, [string]$MotionSource)
     $valid = @($Samples | Where-Object { $null -ne $_ })
     $source = if ($MotionSource) { $MotionSource } else { 'AirPodsSensors' }
     $summary = [ordered]@{ Samples = $valid.Count; MotionSource = $source; LiveShare = 0.0; TrackedShare = 0.0; YawRange = 0.0; PitchRange = 0.0; RollRange = 0.0; NormMin = $null; NormMax = $null; MaxAgeMs = $null; States = ''; Verdict = $null; RealTracking = $false }
