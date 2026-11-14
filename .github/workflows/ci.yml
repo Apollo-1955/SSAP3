@@ -35,7 +35,25 @@ jobs:
           }
 
       - name: Unit, simulated and randomized-input tests (no hardware)
-        run: dotnet test tests/SSAP3.Core.Tests/SSAP3.Core.Tests.csproj -c Release --logger "trx;LogFileName=core-tests.trx" --results-directory TestResults
+        shell: pwsh
+        run: |
+          dotnet test tests/SSAP3.Core.Tests/SSAP3.Core.Tests.csproj -c Release --logger "trx;LogFileName=core-tests.trx" --results-directory TestResults
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Name each failed test in an annotation (readable without the log).
+            $trx = Get-ChildItem TestResults -Recurse -Filter core-tests.trx | Select-Object -First 1
+            if ($trx) {
+              [xml]$results = Get-Content -LiteralPath $trx.FullName -Raw
+              $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
+              Select-Xml -Xml $results -XPath '//t:UnitTestResult[@outcome="Failed"]' -Namespace $ns | Select-Object -First 10 | ForEach-Object {
+                $message = "$($_.Node.Output.ErrorInfo.Message)".Trim()
+                $text = ($message.Substring(0, [Math]::Min(800, $message.Length))).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                $title = "$($_.Node.testName)".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A').Replace(':', '%3A').Replace(',', '%2C')
+                Write-Output "::error title=Test failed%3A $title::$text"
+              }
+            }
+            exit $code
+          }
 
       - name: NuGet vulnerability audit (direct and transitive)
         shell: pwsh

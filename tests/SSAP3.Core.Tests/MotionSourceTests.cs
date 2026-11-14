@@ -247,13 +247,23 @@ public class CompanionProtocolTests
     [Fact]
     public void Pairing_code_round_trips_and_rejects_bad_input()
     {
-        var key = CompanionProtocol.CreatePairingKey();
-        var code = CompanionProtocol.FormatPairingCode(key);
-        Assert.Equal(52 + 12, code.Length);
-        Assert.True(CompanionProtocol.TryParsePairingCode(code.ToLowerInvariant(), out var parsed));
-        Assert.Equal(key, parsed);
-        Assert.False(CompanionProtocol.TryParsePairingCode(code[..^1], out _));
-        Assert.False(CompanionProtocol.TryParsePairingCode(code.Replace('A', '1'), out _) && !code.Contains('A', StringComparison.Ordinal));
+        // A fixed key keeps every check deterministic; a fresh random key is
+        // round-tripped as well.
+        var fixedKey = Enumerable.Range(0, CompanionProtocol.KeyLength).Select(index => (byte)((index * 37) + 11)).ToArray();
+        foreach (var key in new[] { fixedKey, CompanionProtocol.CreatePairingKey() })
+        {
+            var code = CompanionProtocol.FormatPairingCode(key);
+            Assert.Equal(52 + 12, code.Length);
+            Assert.True(CompanionProtocol.TryParsePairingCode(code.ToLowerInvariant(), out var parsed));
+            Assert.Equal(key, parsed);
+            Assert.False(CompanionProtocol.TryParsePairingCode(code[..^1], out _));
+
+            // '1' is never a Base32 (RFC 4648) character. The earlier check
+            // replaced 'A' with '1', which changed nothing, and so failed,
+            // whenever a random code had no 'A' (about 19 % of keys).
+            Assert.False(CompanionProtocol.TryParsePairingCode("1" + code[1..], out _));
+        }
+
         Assert.False(CompanionProtocol.TryParsePairingCode("not a code", out _));
     }
 
