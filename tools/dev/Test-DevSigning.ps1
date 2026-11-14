@@ -350,9 +350,10 @@ try {
         $verifier = Invoke-Ssap3DevNative 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repository 'installer\Test-Ssap3Driver.ps1'), '-Package', $signedDir)
         Check ([bool]($verifier.Lines | Where-Object { $_ -match '^FAIL\s+Package\s+Signature\s+NotMicrosoft' })) 'the production health check reports it as NotMicrosoft'
 
-        $stage = New-Ssap3AdminOnlyStage
-        try { Check (@(Get-Ssap3UntrustedWriters -Path $stage).Count -eq 0 -and (Test-Ssap3TrustedOwner -Path $stage)) 'the install staging folder is administrators-only' }
-        finally { Remove-Item -LiteralPath $stage -Recurse -Force }
+        # (Not $stage: PowerShell names are case-insensitive, and $Stage is the package.)
+        $adminStage = New-Ssap3AdminOnlyStage
+        try { Check (@(Get-Ssap3UntrustedWriters -Path $adminStage).Count -eq 0 -and (Test-Ssap3TrustedOwner -Path $adminStage)) 'the install staging folder is administrators-only' }
+        finally { Remove-Item -LiteralPath $adminStage -Recurse -Force }
 
         if ($testMode) {
             # ------------------ 5a. real InstallDriver, kernel load, RemoveDriver
