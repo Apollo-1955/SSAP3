@@ -24,13 +24,17 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Stage = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\attestation\ssap3aap'),
-    [string]$Cab = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\attestation\ssap3aap.cab')
+    # Default to artifacts\attestation (resolved below: Windows PowerShell 5.1
+    # leaves $PSScriptRoot empty in parameter defaults).
+    [string]$Stage,
+    [string]$Cab
 )
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot -Parent
+if (-not $Stage) { $Stage = Join-Path $repository 'artifacts\attestation\ssap3aap' }
+if (-not $Cab) { $Cab = Join-Path $repository 'artifacts\attestation\ssap3aap.cab' }
 Import-Module (Join-Path $repository 'installer\Ssap3Setup.psm1') -Force -DisableNameChecking -WarningAction SilentlyContinue
 $verifier = Join-Path $repository 'installer\Test-Ssap3Driver.ps1'
 $work = Join-Path ([IO.Path]::GetTempPath()) ("ssap3-signing-test-" + [Guid]::NewGuid().ToString('N'))
@@ -123,7 +127,7 @@ try {
 
     # 5. A genuinely Microsoft-signed package on this runner, if any.
     $production = $null
-    foreach ($folder in Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository" -Directory -ErrorAction SilentlyContinue) {
+    foreach ($folder in Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository" -Directory -ErrorAction SilentlyContinue | Select-Object -First 300) {
         $cat = Get-ChildItem -LiteralPath $folder.FullName -Filter *.cat -ErrorAction SilentlyContinue | Select-Object -First 1
         $sys = Get-ChildItem -LiteralPath $folder.FullName -Filter *.sys -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $cat -or -not $sys) { continue }
