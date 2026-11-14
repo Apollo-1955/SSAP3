@@ -458,6 +458,10 @@ try {
     $none = Watch-Ssap3HeadTracking -Seconds 1 -RecordPath (Join-Path $work 'no-record.bin')
     Check ($none.Samples -eq 0 -and -not $none.RealTracking) 'no head-pose record: no tracking claimed'
 }
+catch {
+    Write-Output "FAIL  the test crashed: $($_.Exception.Message) | at $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber) | stack: $($_.ScriptStackTrace -replace '\s+', ' ')"
+    $failures.Add('crash')
+}
 finally {
     if ($script:RootDevice) { Invoke-Ssap3DevNative (Join-Path $env:SystemRoot 'System32\pnputil.exe') @('/remove-device', $script:RootDevice) | Out-Null }
     try { Remove-Ssap3DevCertificate | Out-Null } catch { Write-Output "WARN  cleanup: $($_.Exception.Message)" }

@@ -945,9 +945,11 @@ function Install-Ssap3DevDriver {
         if ($run.Exit -notin 0, 259, 3010) { throw "pnputil /add-driver failed (exit $($run.Exit)): $($run.Lines -join ' ')" }
         $added = @(Get-Ssap3DevStorePackages | Where-Object { $_.Published -notin $before })
         $state = Read-Ssap3DevState
-        foreach ($package in $added) {
-            $state.drivers = @($state.drivers) + [pscustomobject]@{ published = $package.Published; signer = $package.Signer; thumbprint = $expected; installed = (Get-Date).ToString('o') }
-            $log.Add("Driver store: $($package.Published) (version $($package.Version), signer '$($package.Signer)')")
+        # (Not $package: PowerShell names are case-insensitive, and [string]$Package
+        # would turn each entry into a string.)
+        foreach ($entry in $added) {
+            $state.drivers = @($state.drivers) + [pscustomobject]@{ published = $entry.Published; signer = $entry.Signer; thumbprint = $expected; installed = (Get-Date).ToString('o') }
+            $log.Add("Driver store: $($entry.Published) (version $($entry.Version), signer '$($entry.Signer)')")
         }
         Save-Ssap3DevState $state
         $log.Add($(switch ($run.Exit) { 0 { 'pnputil: installed on the matching device(s)' } 259 { 'pnputil: added to the driver store; no AirPods AAP device is present yet (connect the AirPods)' } 3010 { 'pnputil: installed; Windows needs a restart to finish' } }))
