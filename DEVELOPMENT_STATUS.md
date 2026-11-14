@@ -66,6 +66,7 @@ The status legend:
 | #4 | `f3cf186` | **All jobs green:** managed build and 115 tests, NuGet audit, spatial engine build and tests, driver compile, link and InfVerif, CodeQL C# and C/C++, gitleaks, script checks. |
 | #9–#11 | `99555e1`–`dcf93eb` | New driver pre-submission jobs, fixed one by one:<br>- source scan read a build folder;<br>- the `microsoft/cpp-queries` dependency wasn't downloaded;<br>- no PDB was produced (now `/Z7` + `/DEBUG`);<br>- the CAB check misread `expand -D` output;<br>- 2 role-type warnings. |
 | #12 | `7da096c` | **All jobs green**, including driver image checks, Microsoft's driver CodeQL suites (0 must-fix, 0 recommended), Inf2Cat and the attestation CAB artifact. |
+| #14 | `99ed229` | **All jobs green** after the motion-protocol rewrite and driver protocol v3. Covers MTU 2582, the `0x17` allowlist and the structure-size checks. Results: 158 tests pass, Microsoft's driver CodeQL suites are clean, and the attestation CAB was rebuilt. |
 
 ## Blockers (need the maintainer)
 
