@@ -26,8 +26,9 @@ design.
 | Attestation submission CAB in the required layout | Done (CI artifact `ssap3-driver-attestation-cab-unsigned`) |
 | EV signing helper | Done (`driver/Sign-AttestationCab.ps1`; rehearsed in CI with a throwaway certificate) |
 | Signature, integrity and identity verification | Done (`installer/Test-Ssap3Driver.ps1` and Setup's rule; tested on real catalogs and in CI) |
-| Temporary development signing for a dedicated development PC (`tools/dev/Ssap3DevSigning.ps1`; Test F) | Done (this PC: read-only checks and the certificate round trip; CI: the full lifecycle) |
-| Loading the development-signed driver in test mode; real head tracking | **Not yet:** needs a development PC with Secure Boot turned off by its owner. Blocked on this PC by Secure Boot, by design |
+| Temporary development signing for a dedicated development PC (`tools/dev/Ssap3DevSigning.ps1`; Test F) | Done (this PC: read-only checks and the certificate round trip; CI #35: the full lifecycle, 93 checks) |
+| Development-signed driver loaded by the Windows kernel under test signing | **Done on the CI runner** (no Bluetooth: a root-enumerated test device; Memory Integrity off there) |
+| The same on a PC with AirPods, Memory Integrity on; real head tracking | **Not yet:** needs a development PC with Secure Boot turned off by its owner. Blocked on this PC by Secure Boot, by design |
 | Organization, EV certificate, Partner Center account | **Maintainer** |
 | Signing the CAB with the EV certificate; submitting; downloading Microsoft's package | **Maintainer + Microsoft** |
 | Loading the signed driver; Driver Verifier; head tracking on AirPods Pro 3 | **Not yet** (needs the signed package) |
@@ -67,7 +68,8 @@ design.
 | Fresh install (no driver: driverless tier) | PC | 2026-11-13, succeeded; rollback also exercised by an early failed attempt |
 | In-place upgrade (reverts and re-applies all 13 recorded changes) | PC | 2026-11-14, three times: engine 2.6.0; engine 2.7.0 (first try failed safely on a locked `SSAP3.exe`, before any system change; installer fixed; second try succeeded). The installed files matched the staged package byte for byte |
 | Driver step without a Microsoft-signed package | PC | Setup logged "skipped … nothing was changed" |
-| Driver install, upgrade, uninstall, reinstall | not yet | needs the signed package |
+| Driver install and uninstall, development-signed (`InstallDriver`, `RemoveDriver`) | CI #35 | pass on a root-enumerated test device; see Test F |
+| Driver install, upgrade, uninstall, reinstall, Microsoft-signed through SSAP3 Setup | not yet | needs the signed package |
 | Uninstall of the current install | not yet | not run on this PC |
 
 ## Test D: head tracking
@@ -101,8 +103,21 @@ which Windows allows only with Secure Boot off.
 | Reuse, removal, look-alike | PC | Generating again reused the same certificate. Removal deleted the certificate and its key file: the user store and the key folder matched their earlier state. A certificate with the same subject but no marker was left alone |
 | Marker encoding | PC | A custom UUID OID (arc 2.25) was tried first; CryptoAPI cannot encode its 128-bit arc. The marker now uses the standard comment extension |
 | `Report`, `WatchTracking` | PC | Driver `NotInstalled`. The watcher read 27 head-pose samples from the installed SSAP3 (Fixed mode) and reported "Not tracking", correctly |
-| Signing, trust, driver store, renewal and removal on the real package | CI | see below |
-| Driver loads in test mode; Tracked mode follows real head movement | not yet | needs a development PC (`tools/dev/README.md`) |
+| CI runner configuration | CI #35 | GitHub's `windows-latest` image runs **with Secure Boot off and test signing on**; Memory Integrity is not running there |
+| Certificate profile, reuse, 1–90-day limit, PFX export refused | CI #35 | pass |
+| Signing the real CI package (folder and CAB): embedded `.sys` signature, signed catalog, `.sys` still catalogued, INF unchanged, signing record | CI #35 | pass |
+| Refusals: a CAB not matching its `.sha256`, re-signing a signed package, an output folder holding other files | CI #35 | pass |
+| One changed code byte; a changed INF; a look-alike certificate (same subject, no marker) | CI #35 | all detected |
+| Statuses before trust: 1 yes, 2 no, 4 no (`NotTrusted`); after trust: 1 yes, 2 yes, 4 no (`NotMicrosoft`). Setup and the production health check refuse it either way | CI #35 | pass |
+| Real `InstallDriver`: certificate, machine trust, signing, verification of the administrators-only copy, `pnputil` | CI #35 | `oem12.inf` in the driver store, signer "SSAP3 Temporary Driver Signing" |
+| **Kernel load under test signing** on a root-enumerated test device (no Bluetooth, no AirPods) | CI #35 | **Windows loaded the development-signed driver**: device started (problem code 0), service running, no Code Integrity events. Health check reached `Reachable` (protocol v4, inbound MTU 2582, AAP channel unusable and unbound, as expected without Bluetooth) |
+| Protocol v4 access checks on the live device | CI #35 | OPEN, CLOSE and SEND on a read-only handle: access denied. An empty OPEN and a 16-byte READ: rejected (error 122). The device still answered afterwards |
+| `Report` with the driver loaded | CI #35 | 1. cryptographically signed: Yes; 2. locally trusted: Yes; 3. accepted under test-signing policy: Yes (kernel loaded it); 4. Microsoft-signed: No |
+| `RemoveDriver` with the device present; then the test device removed | CI #35 | Package removed, driver unloaded, leftover `ssap3aap` service entry removed |
+| Renewal; `EnableTestSigning` and `DisableTestSigning` leave alone a test-signing setting SSAP3 did not make; removal with a tampered state file; `-DiscardKey` | CI #35 | pass |
+| Stores after the test | CI #35 | Nothing missing from LocalMachine Root or TrustedPublisher or from CurrentUser\My, and no SSAP3 certificate or driver package left |
+| Tracking verdicts on synthetic samples (real, simulated, Fixed mode, stale, not moving, non-normalized, no record) | CI #35 | pass |
+| Driver loads **with Memory Integrity on**; real Bluetooth binding; Tracked mode follows real head movement | not yet | needs a development PC with AirPods (`tools/dev/README.md`) |
 
 ## CI results (run #29, commit `b6a2acc`, all jobs green)
 

@@ -32,6 +32,16 @@ It is **not a Microsoft signature**. Three things follow from that:
 The app, the head-tracking pipeline and the spatial engine are the same for
 both: the app talks to whichever SSAP3 driver is loaded.
 
+**Tested so far** (`docs/DRIVER_TEST_REPORT.md`, Test F):
+
+- **CI run #35, 93 checks.** GitHub's runner image is already in test mode.
+  On a root-enumerated test device there, the Windows kernel loaded a
+  development-signed driver, the control interface answered, and the driver
+  was removed cleanly. That runner has no Bluetooth or AirPods, and Memory
+  Integrity is off.
+- **Not tested yet:** a PC with AirPods and Memory Integrity on, which needs
+  a development PC.
+
 ### What blocks it, and why
 
 Windows lets test-signed drivers load only in **test mode**

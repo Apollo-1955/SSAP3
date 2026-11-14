@@ -21,7 +21,12 @@
     test-signing change.
   - SSAP3 Setup still refuses the package. The production path is unchanged.
   - CI rehearses the full lifecycle on a throwaway runner certificate
-    (`tools/dev/Test-DevSigning.ps1`). It also checks that published driver
+    (`tools/dev/Test-DevSigning.ps1`; run #35: 93 checks). GitHub's runner
+    image already runs in test mode, so CI also loads the
+    development-signed driver in the kernel on a root-enumerated test device
+    (no Bluetooth). There it checks that the device starts, that the
+    control interface answers with protocol v4, and that its access checks
+    hold, then removes everything. CI also checks that published driver
     artifacts stay unsigned, and that production setup never references the
     tool.
   - `driver\package-driver.ps1` no longer test-signs, and
