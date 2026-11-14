@@ -74,6 +74,21 @@ Other source-only references:
 
   SSAP3 then hardens that install (`SECURITY_REPORT.md` S-23 to S-26).
 
+## Motion protocol research (facts only, no code)
+
+The SensorDataWX parser, the start/stop command builder and the motion
+decoder in `src/SSAP3.Core/Motion` were written for SSAP3. They follow
+protocol facts published by these projects, and no source code from them is
+included:
+
+- LibrePods (GPL-3.0): `docs/AAP Definitions.md` and the motion-block layout
+  from PR #887;
+- pabloaul/apple-wireshark (RTBuddy dissector grammar);
+- FIocker/aap-head-tracker (GPL-3.0);
+- ShiratsuYudachi/airpods-head-track;
+- starman-tech/mousepods (Apache-2.0);
+- freaktopus/auricle (MIT).
+
 ## VST compatibility declarations
 
 The minimal VST 2 ABI declarations used by `SSAP3Spatializer` are compatible

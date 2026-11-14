@@ -197,7 +197,7 @@ Ssap3QueueReceivedPacket(
     KIRQL oldIrql;
     ULONG slot;
 
-    if (PacketLength == 0 || PacketLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+    if (PacketLength == 0 || PacketLength > SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
         return;
     }
 
@@ -237,7 +237,7 @@ Ssap3FormatContinuousRead(
     packetBuffer = WdfMemoryGetBuffer(Session->ReaderBufferMemory, &packetBufferLength);
     if (packetBuffer == NULL ||
         packetBufferLength == 0 ||
-        packetBufferLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        packetBufferLength > SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
@@ -368,7 +368,7 @@ Ssap3ReaderCompletion(
         packetBuffer = (const UCHAR*)WdfMemoryGetBuffer(session->ReaderBufferMemory, NULL);
         if (packetBuffer != NULL &&
             packetLength != 0 &&
-            packetLength <= SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+            packetLength <= SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
             Ssap3QueueReceivedPacket(session, packetBuffer, packetLength);
         }
     } else {
@@ -441,7 +441,7 @@ Ssap3StartContinuousReader(
         &attributes,
         NonPagedPoolNx,
         SSAP3_SESSION_POOL_TAG,
-        SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH,
+        SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH,
         &Session->ReaderBufferMemory,
         NULL);
     if (!NT_SUCCESS(status)) {
@@ -535,15 +535,22 @@ Ssap3PopulateDefaultOpenConfig(
 {
     OpenChannelBrb->ChannelFlags = CF_ROLE_EITHER | CF_LINK_NOTHING;
 
+    /*
+     * 2582 is the L2CAP MTU iOS uses for AAP. AirPods only announce sensor
+     * services (including the fused-motion service) whose descriptors fit the
+     * receiver's MTU, so a smaller value hides head tracking. Both directions
+     * offer the same range; outbound packets are separately capped at 512 bytes
+     * and filtered by Ssap3IsAllowedOutboundPacket.
+     */
     OpenChannelBrb->ConfigOut.Flags = CFG_MTU;
     OpenChannelBrb->ConfigOut.Mtu.Min = L2CAP_MIN_MTU;
-    OpenChannelBrb->ConfigOut.Mtu.Preferred = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
-    OpenChannelBrb->ConfigOut.Mtu.Max = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
+    OpenChannelBrb->ConfigOut.Mtu.Preferred = SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
+    OpenChannelBrb->ConfigOut.Mtu.Max = SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
 
     OpenChannelBrb->ConfigIn.Flags = CFG_MTU;
     OpenChannelBrb->ConfigIn.Mtu.Min = L2CAP_MIN_MTU;
-    OpenChannelBrb->ConfigIn.Mtu.Preferred = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
-    OpenChannelBrb->ConfigIn.Mtu.Max = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
+    OpenChannelBrb->ConfigIn.Mtu.Preferred = SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
+    OpenChannelBrb->ConfigIn.Mtu.Max = SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
     OpenChannelBrb->IncomingQueueDepth = 50;
 }
 
@@ -649,7 +656,7 @@ Ssap3TransportOpenSession(
 
     *Mtu = brb.BrbL2caOpenChannel.OutResults.Params.Mtu != 0
         ? brb.BrbL2caOpenChannel.OutResults.Params.Mtu
-        : SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
+        : SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
     *CapabilityFlags =
         SSAP3_DRIVER_CAPABILITY_DRIVER_BACKED_L2CAP |
         SSAP3_DRIVER_CAPABILITY_AACP_CONTROL |
@@ -721,7 +728,7 @@ Ssap3TransportSendPacket(
     NTSTATUS status;
 
     if (Session->ChannelHandle == NULL || Packet == NULL || PacketLength == 0 ||
-        PacketLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        PacketLength > SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH) {
         *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
         return STATUS_INVALID_PARAMETER;
     }
@@ -799,7 +806,7 @@ Ssap3TransportReadPacket(
 
     slot = Session->PacketQueueHead;
     availableLength = Session->PacketQueueLengths[slot];
-    if (availableLength > PacketBufferLength || availableLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+    if (availableLength > PacketBufferLength || availableLength > SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
         KeReleaseSpinLock(&Session->PacketLock, oldIrql);
         *DriverError = SSAP3_DRIVER_ERROR_INVALID_ARGUMENT;
         return STATUS_BUFFER_TOO_SMALL;
@@ -816,6 +823,78 @@ Ssap3TransportReadPacket(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Opcode 0x0017 (RTBuddy/SensorDataWX) is limited to the one command SSAP3
+ * sends: a sensor ServiceSetting that starts or stops a sensor stream.
+ *
+ *   04 00 04 00 17 00 | 00 00 10 00 (SensorDataWX) | u16 body length |
+ *   08 <request id varint, 1-2 bytes>
+ *   42 0B 08 <service 1..127> 10 02 1A 05 01 <u32 interval in microseconds>
+ *
+ * The interval must be 0 (stop) or 5 ms to 1 s, so a local process cannot
+ * use the driver to send arbitrary RTBuddy messages or flood the link.
+ */
+static
+BOOLEAN
+Ssap3IsAllowedSensorSettingPacket(
+    _In_reads_bytes_(PacketLength) const UCHAR* Packet,
+    _In_ ULONG PacketLength
+    )
+{
+    ULONG offset;
+    ULONG bodyLength;
+    ULONG interval;
+
+    if (PacketLength < 12u) {
+        return FALSE;
+    }
+
+    if (Packet[6] != 0x00 || Packet[7] != 0x00 || Packet[8] != 0x10 || Packet[9] != 0x00) {
+        return FALSE;
+    }
+
+    bodyLength = (ULONG)Packet[10] | ((ULONG)Packet[11] << 8);
+    if (bodyLength != PacketLength - 12u) {
+        return FALSE;
+    }
+
+    offset = 12u;
+    if (offset >= PacketLength || Packet[offset] != 0x08) {
+        return FALSE;
+    }
+    offset++;
+
+    /* Request id: a one- or two-byte varint. */
+    if (offset >= PacketLength) {
+        return FALSE;
+    }
+    if ((Packet[offset] & 0x80u) != 0) {
+        offset++;
+        if (offset >= PacketLength || (Packet[offset] & 0x80u) != 0) {
+            return FALSE;
+        }
+    }
+    offset++;
+
+    if (PacketLength - offset != 13u) {
+        return FALSE;
+    }
+
+    if (Packet[offset] != 0x42 || Packet[offset + 1u] != 0x0B || Packet[offset + 2u] != 0x08 ||
+        Packet[offset + 3u] == 0x00 || (Packet[offset + 3u] & 0x80u) != 0 ||
+        Packet[offset + 4u] != 0x10 || Packet[offset + 5u] != 0x02 ||
+        Packet[offset + 6u] != 0x1A || Packet[offset + 7u] != 0x05 || Packet[offset + 8u] != 0x01) {
+        return FALSE;
+    }
+
+    interval =
+        (ULONG)Packet[offset + 9u] |
+        ((ULONG)Packet[offset + 10u] << 8) |
+        ((ULONG)Packet[offset + 11u] << 16) |
+        ((ULONG)Packet[offset + 12u] << 24);
+    return interval == 0u || (interval >= 5000u && interval <= 1000000u);
+}
+
 _Use_decl_annotations_
 BOOLEAN
 Ssap3IsAllowedOutboundPacket(
@@ -825,7 +904,7 @@ Ssap3IsAllowedOutboundPacket(
 {
     USHORT opcode;
 
-    if (Packet == NULL || PacketLength < 6 || PacketLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+    if (Packet == NULL || PacketLength < 6 || PacketLength > SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH) {
         return FALSE;
     }
 
@@ -845,8 +924,10 @@ Ssap3IsAllowedOutboundPacket(
             return PacketLength >= 7 &&
                 (Packet[6] == 0x06 || Packet[6] == 0x0D || Packet[6] == 0x28);
 
+        case 0x0017: /* sensor stream start/stop only */
+            return Ssap3IsAllowedSensorSettingPacket(Packet, PacketLength);
+
         case 0x000F: /* notification request */
-        case 0x0017: /* head-tracking stream control */
         case 0x004D: /* feature flags */
             return TRUE;
 

@@ -25,14 +25,19 @@ public enum DriverConnectOutcome
 }
 
 /// <summary>
-/// User-mode client for the SSAP3 AAP transport driver (protocol v2,
+/// User-mode client for the SSAP3 AAP transport driver (protocol v3,
 /// driver/shared/ssap3_driver_protocol.h). One instance owns exactly one
 /// handle and one session; dispose it to close both.
 /// </summary>
 public sealed class Ssap3DriverAacpClient : IDisposable
 {
-    public const uint ProtocolVersion = 2;
-    public const int MaxPacketLength = 512;
+    public const uint ProtocolVersion = 3;
+
+    /// <summary>Largest packet SSAP3 sends (the driver enforces the same cap).</summary>
+    public const int MaxOutboundPacketLength = 512;
+
+    /// <summary>The L2CAP receive MTU iOS uses; AirPods hide sensor services that do not fit.</summary>
+    public const int MaxInboundPacketLength = 2582;
 
     private const uint CmGetDeviceInterfaceListPresent = 0;
     private const uint CrSuccess = 0;
@@ -45,9 +50,12 @@ public sealed class Ssap3DriverAacpClient : IDisposable
     private const int StatusSize = 40;
     private const int OpenRequestSize = 24;
     private const int OpenResponseSize = 24;
-    private const int SendRequestSize = 24 + MaxPacketLength;
+    private const int SendRequestSize = 24 + MaxOutboundPacketLength;
     private const int ReadRequestSize = 24;
-    private const int ReadResponseSize = 16 + MaxPacketLength;
+
+    // 16 + 2582 = 2598, padded by the C compiler to a multiple of 8 (the driver
+    // header checks sizeof == 2600 at compile time).
+    private const int ReadResponseSize = (16 + MaxInboundPacketLength + 7) & ~7;
     private const uint IoctlGetBridgeStatus = 0x00222000;
     private const uint IoctlOpenAacpChannel = 0x00222004;
     private const uint IoctlCloseAacpChannel = 0x00222008;
@@ -143,7 +151,7 @@ public sealed class Ssap3DriverAacpClient : IDisposable
                 return new(
                     DriverConnectOutcome.Connected,
                     "AACP session open.",
-                    new Ssap3DriverAacpClient(handle, path, sessionId, Math.Min(maximumPacketSize, MaxPacketLength)));
+                    new Ssap3DriverAacpClient(handle, path, sessionId, Math.Min(maximumPacketSize, (uint)MaxInboundPacketLength)));
             }
             catch (Exception exception) when (exception is Win32Exception or IOException)
             {
@@ -164,9 +172,9 @@ public sealed class Ssap3DriverAacpClient : IDisposable
 
     public void Send(ReadOnlySpan<byte> packet)
     {
-        if (packet.IsEmpty || packet.Length > MaxPacketLength)
+        if (packet.IsEmpty || packet.Length > MaxOutboundPacketLength)
         {
-            throw new ArgumentOutOfRangeException(nameof(packet), $"AACP packets must be 1-{MaxPacketLength} bytes.");
+            throw new ArgumentOutOfRangeException(nameof(packet), $"AACP packets must be 1-{MaxOutboundPacketLength} bytes.");
         }
 
         var request = new byte[SendRequestSize];
@@ -186,7 +194,7 @@ public sealed class Ssap3DriverAacpClient : IDisposable
     {
         var request = new byte[ReadRequestSize];
         BinaryPrimitives.WriteUInt32LittleEndian(request, ReadRequestSize);
-        BinaryPrimitives.WriteUInt32LittleEndian(request.AsSpan(4), MaxPacketLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(request.AsSpan(4), MaxInboundPacketLength);
         byte[] response;
         lock (_ioSync)
         {
@@ -196,7 +204,7 @@ public sealed class Ssap3DriverAacpClient : IDisposable
         }
 
         var packetLength = BinaryPrimitives.ReadUInt32LittleEndian(response.AsSpan(4));
-        if (packetLength > MaxPacketLength)
+        if (packetLength > MaxInboundPacketLength)
         {
             throw new IOException("The driver returned an oversized AACP packet.");
         }

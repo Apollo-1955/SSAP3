@@ -50,8 +50,6 @@ internal sealed class AirPodsService : IDisposable
     private static readonly TimeSpan StatePublishInterval = TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan UiPublishInterval = TimeSpan.FromMilliseconds(66);
     private static readonly TimeSpan OwnsConnectionSettle = TimeSpan.FromMilliseconds(350);
-    private static readonly TimeSpan FallbackStartAfter = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan StallRestartAfter = TimeSpan.FromSeconds(4);
 
     private readonly SynchronizationContext _ui;
     private readonly ConcurrentQueue<Action<TimeSpan>> _commands = new();
@@ -76,12 +74,10 @@ internal sealed class AirPodsService : IDisposable
     private SpatialEngineMode _spatialMode;
     private SoundstageSettings _stage;
     private bool _headTrackingEnabled = true;
+    private readonly MotionStreamController _motionStream = new();
     private bool _motionRequested;
     private bool _ownsConnectionSent;
-    private bool _primaryStartSent;
-    private bool _fallbackStartSent;
     private TimeSpan _motionRequestedAt;
-    private TimeSpan _lastMotionRestart;
     private TimeSpan _lastLinkPoll = TimeSpan.Zero;
     private TimeSpan _lastDriverProbe = TimeSpan.Zero;
     private TimeSpan _lastStateWrite = TimeSpan.Zero;
@@ -96,7 +92,7 @@ internal sealed class AirPodsService : IDisposable
         _ui = SynchronizationContext.Current ?? new SynchronizationContext();
         _spatialMode = settings.SpatialMode;
         _stage = settings.Soundstage.Sanitized();
-        _decoder = new LegacyOpaqueOrientationDecoder(settings.InvertYaw, settings.InvertPitch);
+        _decoder = new DeviceMotionOrientationDecoder(settings.InvertYaw);
         _estimator = new HeadPoseEstimator(new HeadPoseEstimatorOptions { DriftCorrection = settings.DriftCorrection });
         _conversation = new ConversationModeController(new ConversationModeOptions
         {
@@ -123,9 +119,10 @@ internal sealed class AirPodsService : IDisposable
 
     public void Recenter() => Enqueue(_ => _estimator.RequestRecenter());
 
+    // invertPitch is kept for the settings contract; the decoder provides yaw only.
     public void SetCalibration(bool invertYaw, bool invertPitch, bool driftCorrection) => Enqueue(_ =>
     {
-        _decoder = new LegacyOpaqueOrientationDecoder(invertYaw, invertPitch);
+        _decoder = new DeviceMotionOrientationDecoder(invertYaw);
         _estimator = new HeadPoseEstimator(new HeadPoseEstimatorOptions { DriftCorrection = driftCorrection });
         _lastSampleTime = TimeSpan.Zero;
     });
@@ -344,14 +341,30 @@ internal sealed class AirPodsService : IDisposable
 
     private void HandlePacket(byte[] data, TimeSpan receivedAt, TimeSpan now)
     {
-        if (HeadTrackingFrameParser.TryParse(data, out var frame))
+        // RTBuddy sensor channel (opcode 0x17): service announcements and motion reports.
+        if (SensorDataWx.TryParse(data, out var sensorMessage))
         {
-            _motion.OnFrame(receivedAt);
-            if (_decoder.TryDecode(frame, out var orientation))
+            if (sensorMessage.HasAnnouncement)
             {
-                var timestamp = receivedAt > _lastSampleTime ? receivedAt : _lastSampleTime + TimeSpan.FromTicks(2500);
-                _lastSampleTime = timestamp;
-                _estimator.AddSample(new OrientationSample(timestamp, orientation, _decoder.Info.ProvidesRoll));
+                var before = _motionStream.DiscoveredService;
+                _motionStream.OnAnnouncement(sensorMessage.AnnouncedService, sensorMessage.AnnouncementPayload);
+                if (_motionStream.DiscoveredService != before)
+                {
+                    Ssap3AppLog.Write($"AirPods announced the fused-motion service as ID {_motionStream.DiscoveredService}.");
+                }
+            }
+
+            if (_motionRequested &&
+                HeadTrackingFrameParser.TryParse(data, out var frame) &&
+                _motionStream.AcceptReport(frame.Service))
+            {
+                _motion.OnFrame(receivedAt);
+                if (_decoder.TryDecode(frame, out var orientation))
+                {
+                    var timestamp = receivedAt > _lastSampleTime ? receivedAt : _lastSampleTime + TimeSpan.FromTicks(2500);
+                    _lastSampleTime = timestamp;
+                    _estimator.AddSample(new OrientationSample(timestamp, orientation, _decoder.Info.ProvidesRoll));
+                }
             }
 
             return;
@@ -427,11 +440,10 @@ internal sealed class AirPodsService : IDisposable
         {
             _motionRequested = true;
             _ownsConnectionSent = false;
-            _primaryStartSent = false;
-            _fallbackStartSent = false;
             _motionRequestedAt = now;
-            _lastMotionRestart = now;
             _estimator.Reset();
+            _decoder.Reset();
+            _ = _motionStream.Stop(); // forget a session from a previous link
             _lastSampleTime = TimeSpan.Zero;
             _motion.Start(now);
         }
@@ -443,26 +455,18 @@ internal sealed class AirPodsService : IDisposable
             return;
         }
 
-        if (!_primaryStartSent && now - _motionRequestedAt >= OwnsConnectionSettle)
+        if (now - _motionRequestedAt < OwnsConnectionSettle)
         {
-            client.Send(AacpPacketFactory.CreateAlternateStartHeadTracking());
-            _primaryStartSent = true;
             return;
         }
 
-        var status = _motion.Evaluate(now);
-        if (!_fallbackStartSent && _primaryStartSent && status == MotionStreamStatus.WaitingForFirstFrame &&
-            now - _motionRequestedAt >= FallbackStartAfter)
+        // Discovery, candidate fallback, lock-on and stall restarts (MotionStreamController).
+        var commands = _motionStream.IsRunning
+            ? _motionStream.Tick(now, _motion.Evaluate(now))
+            : _motionStream.Start(now);
+        foreach (var command in commands)
         {
-            client.Send(AacpPacketFactory.CreateStartHeadTracking());
-            _fallbackStartSent = true;
-        }
-
-        // Recovery: re-request a stalled stream, at most every few seconds.
-        if (status == MotionStreamStatus.Stalled && now - _lastMotionRestart >= StallRestartAfter)
-        {
-            _lastMotionRestart = now;
-            client.Send(AacpPacketFactory.CreateAlternateStartHeadTracking());
+            client.Send(command);
         }
     }
 
@@ -475,10 +479,13 @@ internal sealed class AirPodsService : IDisposable
 
         _motionRequested = false;
         _motion.Stop();
+        var commands = _motionStream.Stop();
         try
         {
-            _client?.Send(AacpPacketFactory.CreateAlternateStopHeadTracking());
-            _client?.Send(AacpPacketFactory.CreateStopHeadTracking());
+            foreach (var command in commands)
+            {
+                _client?.Send(command);
+            }
         }
         catch (Exception exception) when (exception is IOException or Win32Exception or InvalidOperationException)
         {

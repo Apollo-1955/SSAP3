@@ -2,6 +2,27 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Head tracking decoder rebuilt from the documented motion protocol**
+  (`HARDWARE_COMPATIBILITY.md`, *Motion protocol*):
+  - motion packets are parsed as RTBuddy SensorDataWX protobuf. The old fixed
+    offsets misread every 80-byte packet;
+  - yaw comes from the fused attitude quaternion (Q15) as its twist about the
+    gravity-aligned axis, so it works however the bud sits in the ear. The
+    old heuristic is gone;
+  - the AirPods' sensor-service announcements are used to find a dynamically
+    numbered `devmotion6` service. Otherwise the app tries 16, then 14, and
+    locks onto the one that streams;
+  - unexplained attitude jumps re-anchor instead of snapping (for example a
+    bud switch, detected with the rotation-rate field);
+  - `SSAP3-TransportProbe <address> Motion` prints the decoded stream for
+    first-run hardware checks.
+- **Driver protocol v3:**
+  - inbound L2CAP MTU raised to 2582 (iOS's value) so the AirPods announce
+    the motion service; the queue stays bounded;
+  - opcode `0x17` from user mode is limited to the documented sensor
+    start/stop command (S-29);
+  - compile-time structure-size checks.
+
 - **Driver signing preparation:**
   - CI builds the Partner Center attestation CAB
     (`ssap3-driver-attestation-cab-unsigned`), with `.sys`, `.inf`, `.pdb`

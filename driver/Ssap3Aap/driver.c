@@ -313,7 +313,7 @@ Ssap3CreateDevice(
     InitializeListHead(&deviceContext->ZombieSessions);
     deviceContext->SessionCount = 0;
     deviceContext->NextSessionId = 1;
-    deviceContext->MaxPacketSize = SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH;
+    deviceContext->MaxPacketSize = SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH;
     deviceContext->InitializationFlags = 0;
     deviceContext->InitializationFailureStage = 0;
     deviceContext->InitializationStatus = STATUS_SUCCESS;

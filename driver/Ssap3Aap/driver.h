@@ -13,7 +13,9 @@
 /* Pool tags display as "SS3D" / "SS3S" in pool tools. */
 #define SSAP3_DRIVER_POOL_TAG 'D3SS'
 #define SSAP3_SESSION_POOL_TAG 'S3SS'
-#define SSAP3_PACKET_QUEUE_DEPTH 32u
+/* 16 x 2582-byte slots (about 41 KB of NonPagedPoolNx per session, at most
+ * 4 sessions per device). The oldest packet is dropped when a reader lags. */
+#define SSAP3_PACKET_QUEUE_DEPTH 16u
 
 /* Bounded waits (SECURITY_AUDIT.md, S-06). */
 #define SSAP3_OPEN_CHANNEL_TIMEOUT_MS 10000
@@ -51,7 +53,7 @@ typedef struct _SSAP3_SESSION_ENTRY {
     ULONG PacketQueueCount;
     ULONG PacketQueueLengths[SSAP3_PACKET_QUEUE_DEPTH];
     ULONGLONG PacketQueueTimes[SSAP3_PACKET_QUEUE_DEPTH];
-    UCHAR PacketQueue[SSAP3_PACKET_QUEUE_DEPTH][SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH];
+    UCHAR PacketQueue[SSAP3_PACKET_QUEUE_DEPTH][SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH];
 } SSAP3_SESSION_ENTRY, *PSSAP3_SESSION_ENTRY;
 
 typedef struct _SSAP3_FILE_CONTEXT {

@@ -44,7 +44,8 @@ The status legend:
 | Area | Implemented | Tested (simulated) | Executed on this PC | Hardware-verified |
 | --- | --- | --- | --- | --- |
 | Managed build, 0 warnings, security analyzers | ✓ | n/a | ✓ | n/a |
-| Core tests (115) | ✓ | ✓ | ✓ | — |
+| Core tests (158) | ✓ | ✓ | ✓ | — |
+| Motion protocol (SensorDataWX protobuf, quaternion yaw, service discovery, MTU 2582) | ✓ | ✓ (synthetic packets in the documented layout; byte-exact vs 6 published commands) | — (needs the signed driver) | — |
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |

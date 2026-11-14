@@ -22,21 +22,17 @@ public class RandomizedRobustnessTests
         Convert.FromHexString("0400040009000D03000000"),
         Convert.FromHexString("040004004B0002000101"),
         Convert.FromHexString("04000400040003020164020104016301010801110201"),
-        HeadTrackingSeed(),
+        SensorPackets.Motion(0x10, 16, SensorPackets.Report(System.Numerics.Quaternion.Normalize(new System.Numerics.Quaternion(0.1f, 0.2f, -0.3f, 0.9f)))),
+        SensorPackets.Motion(0x110, 6, SensorPackets.Report(SensorPackets.Yaw(75), rate: (500, -20, 9000))),
+        SensorPackets.Announcement(6, "AccessoryService=devmotion6"),
+        SensorDataWx.CreateServiceSetting(0x73, 16, 40000),
     ];
-
-    private static byte[] HeadTrackingSeed()
-    {
-        var packet = new byte[72];
-        new byte[] { 0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00, 0x44, 0x00 }.CopyTo(packet, 0);
-        return packet;
-    }
 
     private static byte[] NextInput(Random random)
     {
         if (random.Next(3) == 0)
         {
-            var buffer = new byte[random.Next(0, 600)];
+            var buffer = new byte[random.Next(0, 3000)];
             random.NextBytes(buffer);
             return buffer;
         }
@@ -75,6 +71,8 @@ public class RandomizedRobustnessTests
     {
         var random = new Random(20261113);
         var battery = new AirPodsBatteryPacketParser();
+        var decoder = new DeviceMotionOrientationDecoder();
+        var controller = new MotionStreamController();
         for (var iteration = 0; iteration < Iterations; iteration++)
         {
             var input = NextInput(random);
@@ -105,11 +103,60 @@ public class RandomizedRobustnessTests
                 }
             }
 
+            if (SensorDataWx.TryParse(input, out var sensor))
+            {
+                Assert.InRange(input.Length, SensorDataWx.HeaderLength, AacpFrame.MaximumLength);
+                if (sensor.HasCommand)
+                {
+                    Assert.InRange(sensor.CommandService, 0, ushort.MaxValue);
+                    Assert.True(sensor.CommandPayload.Length <= input.Length - SensorDataWx.HeaderLength);
+                }
+
+                if (sensor.HasAnnouncement)
+                {
+                    controller.OnAnnouncement(sensor.AnnouncedService, sensor.AnnouncementPayload);
+                }
+            }
+
             if (HeadTrackingFrameParser.TryParse(input, out var motion))
             {
-                Assert.InRange(motion.PacketLength, HeadTrackingFrameParser.MinimumLength, HeadTrackingFrameParser.MaximumLength);
-                Assert.True(new LegacyOpaqueOrientationDecoder().TryDecode(motion, out var orientation));
+                Assert.InRange(motion.PacketLength, DeviceMotionReport.MinimumLength + SensorDataWx.HeaderLength, AacpFrame.MaximumLength);
+                var attitude = motion.Report.ToQuaternion();
+                Assert.True(QuaternionMath.IsFinite(attitude));
+                Assert.InRange(attitude.Length(), 0.999f, 1.001f);
+                Assert.True(decoder.TryDecode(motion, out var orientation));
                 Assert.True(QuaternionMath.IsFinite(orientation));
+                Assert.InRange(orientation.Length(), 0.999f, 1.001f);
+            }
+        }
+
+        // A hostile stream never makes the controller emit a command the driver refuses.
+        Assert.True(controller.DiscoveredService is null or (>= 1 and <= 127));
+        _ = controller.Start(TimeSpan.Zero);
+        var commands = controller.Tick(TimeSpan.FromSeconds(1), MotionStreamStatus.WaitingForFirstFrame).Concat(controller.Stop());
+        Assert.All(commands, command => Assert.True(DriverAllowlistMirror.IsAllowedSensorSetting(command)));
+    }
+
+    [Fact]
+    public void Protobuf_reader_is_total_and_bounded()
+    {
+        var random = new Random(1155);
+        var buffer = new byte[256];
+        for (var iteration = 0; iteration < Iterations; iteration++)
+        {
+            var length = random.Next(0, buffer.Length);
+            random.NextBytes(buffer.AsSpan(0, length));
+            var reader = new ProtobufReader(buffer.AsSpan(0, length));
+            var fields = 0;
+            var consumed = 0;
+            while (reader.TryRead(out var field))
+            {
+                fields++;
+                Assert.InRange(field.Number, 1, 536_870_911);
+                Assert.Contains(field.WireType, new[] { 0, 1, 2, 5 });
+                consumed += field.Bytes.Length + 1;
+                Assert.True(consumed <= length);
+                Assert.True(fields <= length);
             }
         }
     }

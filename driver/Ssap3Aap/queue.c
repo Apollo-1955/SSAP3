@@ -231,7 +231,7 @@ Ssap3HandleSendPacket(
     if (input->struct_size < (ULONG)FIELD_OFFSET(ssap3_driver_send_packet_request, packet) ||
         input->session_id == 0 ||
         packetLength == 0 ||
-        packetLength > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        packetLength > SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_INVALID_PARAMETER;
     }
@@ -300,7 +300,7 @@ Ssap3HandleReadPacket(
     if (input->struct_size < sizeof(*input) ||
         input->session_id == 0 ||
         input->packet_buffer_length == 0 ||
-        input->packet_buffer_length > SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH) {
+        input->packet_buffer_length > SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_INVALID_PARAMETER;
     }

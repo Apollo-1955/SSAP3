@@ -1,5 +1,6 @@
 using SSAP3.Core;
 using SSAP3.Core.Aacp;
+using SSAP3.Core.Motion;
 using SSAP3.Platform.Windows;
 
 // Developer tool for hardware validation (HARDWARE_COMPATIBILITY.md). Prints raw
@@ -63,12 +64,20 @@ client.Send(AacpPacketFactory.CreateHandshake());
 client.Send(AacpPacketFactory.CreateFeatureFlags());
 client.Send(AacpPacketFactory.CreateNotificationRequest());
 var motion = args[1].Equals("Motion", StringComparison.OrdinalIgnoreCase);
+var controller = new MotionStreamController();
+var decoder = new DeviceMotionOrientationDecoder();
+const int MotionSeconds = 20;
 if (motion)
 {
     client.Send(AacpPacketFactory.CreateOwnsConnection(true));
     Thread.Sleep(500);
-    client.Send(AacpPacketFactory.CreateAlternateStartHeadTracking());
-    Console.WriteLine("Motion stream requested. Move your head for ten seconds.");
+    foreach (var command in controller.Start(MonotonicClock.Now))
+    {
+        client.Send(command);
+        Console.WriteLine($"> start {SensorDataWx.Describe(command)}");
+    }
+
+    Console.WriteLine($"Motion stream requested. Face the screen, then turn your head left and right for {MotionSeconds} seconds.");
 }
 else
 {
@@ -77,10 +86,22 @@ else
     Console.WriteLine($"Requested {mode} ({Convert.ToHexString(AacpPacketFactory.CreateNoiseControl(mode))}); waiting for the echo...");
 }
 
-var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(motion ? 10 : 3);
+var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(motion ? MotionSeconds : 3);
 var frames = 0;
+var largestPacket = 0;
 while (DateTime.UtcNow < deadline)
 {
+    var now = MonotonicClock.Now;
+    if (motion)
+    {
+        var status = frames == 0 ? MotionStreamStatus.WaitingForFirstFrame : MotionStreamStatus.Streaming;
+        foreach (var command in controller.Tick(now, status))
+        {
+            client.Send(command);
+            Console.WriteLine($"> start {SensorDataWx.Describe(command)}");
+        }
+    }
+
     var packet = client.Receive();
     if (packet.IsEmpty)
     {
@@ -88,24 +109,50 @@ while (DateTime.UtcNow < deadline)
         continue;
     }
 
-    var now = MonotonicClock.Now;
+    largestPacket = Math.Max(largestPacket, packet.Data.Length);
     var age = MonotonicClock.FromDriverTime(packet.ReceiveInterruptTime) is { } received ? (now - received).TotalMilliseconds : double.NaN;
-    if (AacpFrame.TryParse(packet.Data, out var frame) && frame.Opcode == AacpOpcodes.HeadTracking)
+    if (SensorDataWx.TryParse(packet.Data, out var message))
     {
-        frames++;
-        if (frames % 25 != 1)
+        if (message.HasAnnouncement)
         {
-            continue;
+            controller.OnAnnouncement(message.AnnouncedService, message.AnnouncementPayload);
+            Console.WriteLine($"[{age,6:0.0} ms] {SensorDataWx.Describe(packet.Data)}");
         }
+
+        if (HeadTrackingFrameParser.TryParse(packet.Data, out var motionFrame) && controller.AcceptReport(motionFrame.Service))
+        {
+            frames++;
+            if (decoder.TryDecode(motionFrame, out var orientation) && frames % 10 == 1)
+            {
+                var (yaw, _, _) = QuaternionMath.ToYawPitchRollDegrees(orientation);
+                var report = motionFrame.Report;
+                var gravity = MathF.Sqrt((float)report.GravityX * report.GravityX + (float)report.GravityY * report.GravityY + (float)report.GravityZ * report.GravityZ) / DeviceMotionReport.CountsPerG;
+                Console.WriteLine(
+                    $"[{age,6:0.0} ms] service {motionFrame.Service} len={motionFrame.PacketLength} yaw={yaw,7:0.0}° (+ = left) " +
+                    $"rate={report.RotationRateDegreesPerSecond,6:0}°/s |g|={gravity:0.00} q15=({report.QuaternionX},{report.QuaternionY},{report.QuaternionZ}) reanchors={decoder.Reanchors}");
+            }
+        }
+        else if (!message.HasAnnouncement)
+        {
+            Console.WriteLine($"[{age,6:0.0} ms] {SensorDataWx.Describe(packet.Data)} {Convert.ToHexString(packet.Data.AsSpan(0, Math.Min(packet.Data.Length, 96)))}");
+        }
+
+        continue;
     }
 
-    Console.WriteLine($"[{age,6:0.0} ms] {Convert.ToHexString(packet.Data)}");
+    Console.WriteLine($"[{age,6:0.0} ms] {Convert.ToHexString(packet.Data.AsSpan(0, Math.Min(packet.Data.Length, 96)))}{(packet.Data.Length > 96 ? "..." : string.Empty)}");
 }
 
 if (motion)
 {
-    client.Send(AacpPacketFactory.CreateAlternateStopHeadTracking());
-    Console.WriteLine($"Head-tracking frames received: {frames} ({frames / 10.0:0.0} per second)");
+    foreach (var command in controller.Stop())
+    {
+        client.Send(command);
+    }
+
+    Console.WriteLine(
+        $"Motion reports used: {frames} ({frames / (double)MotionSeconds:0.0} per second) from service {controller.ActiveService?.ToString() ?? "none"}; " +
+        $"devmotion6 announced as service {controller.DiscoveredService?.ToString() ?? "none"}; largest packet {largestPacket} B.");
 }
 
 return 0;

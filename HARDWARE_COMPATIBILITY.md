@@ -74,9 +74,64 @@ addresses.
 | Listening-mode acknowledgement (echo of `0x0D`) | AACP | Yes | LibrePods docs | Unverified |
 | Conversational awareness toggle (`0x28`) | AACP | Yes | LibrePods docs | Unverified |
 | Speaking-level notifications (`0x4B`) | AACP | Yes | LibrePods docs | Unverified |
-| Head-tracking stream (`0x17`, opaque "orientation 1/2/3" at offsets 43/45/47) | AACP | Yes | LibrePods docs, which give no value encoding | Unverified. Field semantics unknown; **not a documented quaternion** |
-| Fixed binaural soundstage | Equalizer APO + SSAP3 DSP | No (needs `DisableProtectedAudioDG` opt-in) | — | Not installed on this PC |
-| Head-tracked soundstage | DSP + motion | Yes | — | Blocked on the driver |
+| Head-tracking stream (`0x17`, RTBuddy SensorDataWX, protobuf) | AACP | Yes | See *Motion protocol* below | Unverified on Pro 3. Decoder follows the layout confirmed on AirPods 4, AirPods Pro 2 and AirPods Max 2 by independent projects |
+| Fixed binaural soundstage | Equalizer APO + SSAP3 DSP | No (needs `DisableProtectedAudioDG` opt-in) | — | **Working** on this PC (listening test, 2026-11-13) |
+| Head-tracked soundstage | DSP + motion | Yes | — | Blocked on the driver signature |
+
+## Motion protocol (as implemented, 2026-11-13)
+
+Community reverse engineering now documents the stream well enough to decode
+it properly. SSAP3 uses the facts only; no third-party code is included.
+Sources:
+
+- LibrePods `docs/AAP Definitions.md` and PR #887 (layout of the 58-byte
+  block);
+- pabloaul/apple-wireshark (RTBuddy protobuf grammar);
+- FIocker/aap-head-tracker (service IDs; quaternion validated against gravity
+  on AirPods Max 2);
+- ShiratsuYudachi/airpods-head-track (protobuf location; tested on AirPods 4);
+- starman-tech/mousepods (units; MTU findings);
+- freaktopus/auricle (AirPods Pro 2 on Linux).
+
+Packet framing:
+
+- **Header:** `04 00 04 00 17 00`, then the SensorDataWX descriptor
+  `00 00 10 00`, then a u16 body length.
+- **Body:** protobuf. Field 1 is a request or sequence id (varint). Field 7
+  is `{1: service id, 3: report}`. Field 5 is `{1: service id, 2: descriptor}`,
+  which announces a service.
+- **Packet length:** the sequence varint is 1 or 2 bytes, so motion packets
+  are **80 or 81 bytes**. LibrePods' fixed offset 43 is right only for the
+  81-byte form. SSAP3 used to read fixed offsets; it now parses the protobuf.
+
+Report layout:
+
+| Report bytes | Field |
+| --- | --- |
+| `[0]` | `01` |
+| `[1:9]` | u64 timestamp (ns) |
+| `[20:26]` | sensor-to-world attitude quaternion x, y, z in Q15. `w = sqrt(1 − |v|²)`; world Z is vertical |
+| `[26:32]` | rotation rate, about 0.122 °/s per count |
+| `[38:44]` | user acceleration, about 1000 per g |
+| `[44:50]` | gravity, about 1000 per g |
+
+Decoding and stream control:
+
+- **Yaw** is the twist of `q · conj(q_start)` about world Z. It does not
+  depend on how the bud sits in the ear. Pitch and roll are not decoded yet.
+- **Start/stop command:**
+  `08 <id> 42 0B 08 <service> 10 02 1A 05 01 <u32 interval µs>`, with
+  interval 0 to stop. SSAP3 asks for 50 Hz.
+- **Services tried, in order:**
+  1. a service announced as `devmotion6` (AirPods Max 2 firmware uses
+     dynamic id 6);
+  2. 16 (DEVMOTION6);
+  3. 14 (LibrePods' original packet).
+- **MTU:** AirPods announce only the sensor descriptors that fit the
+  receiver's L2CAP MTU. iOS uses 2582, and AirPods 3 hide `devmotion6` at 672.
+  SSAP3's driver now offers 2582 (it was 512).
+- **Not supported:** AirPods 3 (non-Pro) use a different channel (RemoteHID,
+  descriptor `0x800`).
 
 ## Why the AAP features are blocked on this PC
 
@@ -102,10 +157,20 @@ one of these:
 2. `SSAP3-TransportProbe <address> Transparency` sends a mode change and
    prints the echo. Pass when the response contains
    `0400040009000D03000000`.
-3. `SSAP3-TransportProbe <address> Motion` streams motion. Pass when you see
-   more than 50 head-tracking frames per second while moving your head, with
-   orientation fields that change monotonically as you turn left and right.
-4. Record the firmware version, adapter, Windows build, and the raw capture
+3. `SSAP3-TransportProbe <address> Motion` runs the same start sequence as
+   the app for 20 seconds. It prints any service announcements, the service
+   that streams, and every tenth decoded report: yaw, rotation rate, gravity
+   magnitude, raw Q15 vector and re-anchor count. Pass when all of these hold:
+   - about 50 reports per second arrive from one service;
+   - packets are 80 or 81 bytes;
+   - `|g|` is close to 1.00 at rest;
+   - yaw rises as you turn **left** and falls as you turn **right**. If it is
+     reversed, record that and use Settings > Head tracking > **Invert yaw**;
+   - re-anchors stay at 0 while you just move your head.
+4. If no reports arrive, note the announcements printed and the largest
+   packet size. A missing `devmotion6` announcement with small packets points
+   to the MTU.
+5. Record the firmware version, adapter, Windows build, and the probe output
    in a private note. Do not commit Bluetooth addresses.
 
 ## Previously reported upstream (not re-verified by SSAP3)

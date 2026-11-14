@@ -29,7 +29,9 @@ public static class AacpControlIdentifiers
 public readonly ref struct AacpFrame
 {
     public const int HeaderLength = 6;
-    public const int MaximumLength = 512;
+
+    /// <summary>The driver's inbound limit: the L2CAP receive MTU iOS uses.</summary>
+    public const int MaximumLength = 2582;
 
     private AacpFrame(ushort opcode, ReadOnlySpan<byte> payload, ReadOnlySpan<byte> raw)
     {

@@ -47,6 +47,9 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-26 | High | DLL planting: `audiodg.exe` loads every DLL in the Equalizer APO folder; a custom install folder outside Program Files may be user-writable | **Fixed (not executed)** | Setup refuses to continue unless the Equalizer APO folder, each DLL in it, `VSTPlugins`, `HKLM\SOFTWARE\EqualizerAPO` and its `Child APOs` key are admin-only, and `ConfigPath` is inside the install folder. |
 | S-27 | Medium | Setup's own admin-only check was wrong in two ways: composite rights (`Modify`, `FullControl`, `WriteKey`) include read bits, so read-only ACEs counted as write access; and translating ACE names to SIDs throws for capability SIDs (ALL APPLICATION PACKAGES) | **Fixed** | The check now reads SIDs directly and uses modify-only bits (plus unmapped `GENERIC_WRITE`/`GENERIC_ALL`). Tested: `Program Files`, `dotnet.exe` and an HKLM key pass; the user profile is refused. Before the fix, every Program Files path would have been refused, so Setup could never have completed. Registry ACLs are read through the key object because `Get-Acl -LiteralPath` fails on registry paths in Windows PowerShell 5.1. |
 | S-28 | Low | The engine's `Device: AirPods` filter matched any device whose name contains "AirPods", such as a second pair | **Fixed** | Scoped to the endpoint GUIDs that Setup attached. |
+| S-29 | Medium | The driver forwarded **any** opcode-`0x17` payload from user mode, so a local process with access to the device could send arbitrary RTBuddy messages to the AirPods | **Fixed (compile-checked in CI)** | `Ssap3IsAllowedSensorSettingPacket`: only the documented sensor ServiceSetting command is allowed. Checks: exact body length, a 1–2-byte request id, service 1–127, mode 2, and interval 0 or 5 ms–1 s. A C# mirror of the rule is unit-tested against every command the app can emit. |
+| S-30 | Info | Inbound L2CAP MTU raised from 512 to 2582 bytes (iOS's value) so the AirPods announce their motion service | **Bounded** | Inbound and outbound limits are separate constants (outbound stays 512). Queue depth went from 32 to 16 (about 41 KB of `NonPagedPoolNx` per session, at most 4 sessions per device). Every copy is length-checked. Protocol bumped to v3. Compile-time size checks keep the C structures and the C# client in step. |
+| S-31 | Medium | The motion parser read fixed offsets inside a protobuf message, so it misread 80-byte packets | **Fixed** | `ProtobufReader` and `SensorDataWx.TryParse` are total and allocation-free. They reject overlong varints, unsupported wire types, field number 0, lengths past the end and service ids above 65535. Unit tests cover each case, and 200 000 randomized inputs run through the protobuf reader and the sensor parsers. |
 
 No **critical or high** finding is open in source. Several fixes are **not
 yet compiled or executed** (see §6). Until they are, they are not
@@ -56,7 +59,8 @@ release-verified, and a production release stays blocked.
 
 | Surface | Exposure | Controls |
 | --- | --- | --- |
-| AACP packets from the AirPods (≤ 512 B) | Kernel queues them without interpreting them; user mode parses them | Strict total parsers, randomized tests, bounded queue (oldest dropped) |
+| AACP packets from the AirPods (≤ 2582 B) | Kernel queues them without interpreting them; user mode parses them, including protobuf on the sensor channel | Strict total parsers, randomized tests, bounded queue of 16 (oldest dropped) |
+| Commands user mode asks the driver to send (≤ 512 B) | Any interactive user on this PC | Opcode allowlist; `0x17` limited to sensor start/stop with a bounded interval (S-29) |
 | BLE advertisements from any nearby device | User-mode parser | 255-byte cap, total parser, model and RSSI filter |
 | Driver IOCTL interface | Interactive users only | 5 IOCTLs, size and ownership checks, session caps, allowlist, timeouts |
 | Shared state file | Interactive users write; `audiodg` reads | Protected ACL (no create or delete); DSP validation; seqlock |
@@ -103,8 +107,8 @@ after setup.
 | Check | Result |
 | --- | --- |
 | .NET analyzers, `AnalysisModeSecurity=All`, warnings as errors | **Pass.** 0 warnings in all managed projects, after fixing the CA5392 (DLL search path) findings on every P/Invoke with an assembly-level System32-only policy, and the 2 CA5358 findings (single-block AES, justified and centralised). |
-| Unit and simulated tests (xUnit) | **115/115 pass** |
-| Randomized-input tests | 3 × 200 000 parser inputs plus 50 000 hostile estimator samples, 0 failures |
+| Unit and simulated tests (xUnit) | **158/158 pass** (2026-11-13, after the motion-protocol rewrite) |
+| Randomized-input tests | 4 × 200 000 parser inputs (AACP, sensor protobuf, BLE, shared state) plus 50 000 hostile estimator samples, 0 failures |
 | Bluetooth Core Spec `ah` test vector | Pass |
 | PowerShell parse check (14 scripts) | 0 errors |
 | Forbidden-operation scan of production setup | 0 hits |

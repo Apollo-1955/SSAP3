@@ -136,9 +136,16 @@ that doesn't match (`Install-Ssap3Driver`).
 
 1. Connect the AirPods. SSAP3 should report the AAP link instead of
    **Connected (audio only)**.
-2. Select **Tracked**. If the stage doesn't turn with your head, capture a
-   redacted motion log with `SSAP3-TransportProbe` (see
-   `HARDWARE_COMPATIBILITY.md`) so the decoder can be checked against real
-   packets.
-3. Record what worked in `HARDWARE_COMPATIBILITY.md` and
+2. Run `SSAP3-TransportProbe <address> Motion` first. It prints, for 20
+   seconds:
+   - the motion service that streams;
+   - the packet sizes;
+   - the decoded yaw, which should rise as you turn left;
+   - gravity, about 1 g at rest.
+
+   See *Hardware validation procedure* in `HARDWARE_COMPATIBILITY.md` for
+   pass criteria.
+3. Select **Tracked** in SSAP3. If left and right are reversed, use
+   **Invert yaw**.
+4. Record what worked in `HARDWARE_COMPATIBILITY.md` and
    `DEVELOPMENT_STATUS.md`. Keep simulated and hardware results separate.

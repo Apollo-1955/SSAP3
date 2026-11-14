@@ -6,6 +6,10 @@
  *   - a new device-interface GUID, so it never binds to SoundStage/LibrePods drivers;
  *   - the status reply carries the PDO's remote Bluetooth address;
  *   - session limits, address binding and AACP framing checks.
+ * Version 3 separates the inbound and outbound packet limits. Inbound packets
+ * may be up to the L2CAP receive MTU iOS uses (2582): AirPods only announce
+ * the sensor services whose descriptors fit the receiver's MTU, so a small MTU
+ * hides head tracking. Outbound packets stay capped at 512 bytes.
  *
  * Every structure is validated by size in the driver; all IOCTLs are
  * METHOD_BUFFERED and FILE_ANY_ACCESS (access is enforced by the device SDDL).
@@ -34,10 +38,11 @@ typedef unsigned __int64 ssap3_u64;
     ((((device_type) << 16) | ((access) << 14) | ((function) << 2) | (method)))
 #endif
 
-#define SSAP3_DRIVER_PROTOCOL_VERSION 2u
+#define SSAP3_DRIVER_PROTOCOL_VERSION 3u
 #define SSAP3_DRIVER_INTERFACE_GUID_STRING L"{1C3A8128-3668-4428-95A4-B1CAD51B7249}"
 #define SSAP3_DRIVER_MAX_BLUETOOTH_ADDRESS_LENGTH 18u
-#define SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH 512u
+#define SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH 512u
+#define SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH 2582u
 #define SSAP3_DRIVER_MAX_SESSIONS_PER_HANDLE 1u
 #define SSAP3_DRIVER_MAX_SESSIONS_PER_DEVICE 4u
 
@@ -111,7 +116,7 @@ typedef struct ssap3_driver_send_packet_request {
     ssap3_u32 reserved0;
     ssap3_u32 reserved1;
     ssap3_u64 session_id;
-    ssap3_u8 packet[SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH];
+    ssap3_u8 packet[SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH];
 } ssap3_driver_send_packet_request;
 
 typedef struct ssap3_driver_read_packet_request {
@@ -128,7 +133,17 @@ typedef struct ssap3_driver_read_packet_response {
     /* KeQueryInterruptTime() when the packet arrived (100 ns units, system-wide,
      * monotonic; user mode reads the same clock with QueryInterruptTime). */
     ssap3_u64 receive_interrupt_time;
-    ssap3_u8 packet[SSAP3_DRIVER_MAX_AACP_PACKET_LENGTH];
+    ssap3_u8 packet[SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH];
 } ssap3_driver_read_packet_response;
+
+/*
+ * Wire sizes the user-mode client (Ssap3DriverAacpClient.cs) hard-codes. The
+ * read response is padded to a multiple of 8 (16 + 2582 = 2598 -> 2600).
+ * These fail to compile if a structure changes without the client.
+ */
+typedef char ssap3_check_status_size[(sizeof(ssap3_driver_status) == 40u) ? 1 : -1];
+typedef char ssap3_check_send_request_size[(sizeof(ssap3_driver_send_packet_request) == 536u) ? 1 : -1];
+typedef char ssap3_check_read_request_size[(sizeof(ssap3_driver_read_packet_request) == 24u) ? 1 : -1];
+typedef char ssap3_check_read_response_size[(sizeof(ssap3_driver_read_packet_response) == 2600u) ? 1 : -1];
 
 #endif

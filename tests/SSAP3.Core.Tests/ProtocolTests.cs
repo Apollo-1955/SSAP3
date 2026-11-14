@@ -21,18 +21,10 @@ public class PacketFactoryTests
     }
 
     [Fact]
-    public void Handshake_and_head_tracking_packets_are_unchanged()
+    public void Handshake_is_unchanged()
     {
+        // Head-tracking start/stop packets are covered by SensorDataWxTests.
         Assert.Equal("00000400010002000000000000000000", Convert.ToHexString(AacpPacketFactory.CreateHandshake()));
-        Assert.Equal(
-            "040004001700000010000F000873420B081010021A0501409C0000",
-            Convert.ToHexString(AacpPacketFactory.CreateAlternateStartHeadTracking()));
-        Assert.Equal(
-            "040004001700000010000F000875420B081010021A050100000000",
-            Convert.ToHexString(AacpPacketFactory.CreateAlternateStopHeadTracking()));
-        Assert.Equal(
-            "04000400170000001000100008A102420B080E10021A0501409C0000",
-            Convert.ToHexString(AacpPacketFactory.CreateStartHeadTracking()));
     }
 }
 
