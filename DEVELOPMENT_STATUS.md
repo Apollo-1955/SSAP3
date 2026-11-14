@@ -48,7 +48,8 @@ The status legend:
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
 | Driver (C) | ✓ | compiles, links, passes InfVerif (CI run #4); not loaded or run anywhere | ✗ (no WDK locally) | — |
-| Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | ✗ (needs admin and changes the audio stack) | — |
+| Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
+| Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; app writes fresh state (≈200 ms old, engine limit 750 ms). **Audible result not yet confirmed** | — |
 | Package staging (`build-installer.ps1 -StageOnly`) | ✓ | — | ✓ (app published, SBOM written; engine DLL not yet present) | n/a |
 | System-state verifier | ✓ | — | ✓ (`-Verify` pass) | n/a |
 | CI workflow | ✓ | — | ✓ (runs on every push) | n/a |
