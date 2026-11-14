@@ -6,6 +6,12 @@ using SSAP3.Platform.Windows;
 // Developer tool for hardware validation (HARDWARE_COMPATIBILITY.md). Prints raw
 // AACP traffic. Do not share its output publicly: it can include identifiers.
 
+if (args.Length >= 1 && args[0].Equals("--investigate", StringComparison.OrdinalIgnoreCase))
+{
+    // Not awaited: an async Main could not hold the ref-struct parser results used below.
+    return SSAP3.TransportProbe.MotionAccessInvestigation.RunAsync(args.Length > 1 ? args[1] : null).GetAwaiter().GetResult();
+}
+
 if (args.Length >= 1 && args[0].Equals("--ble", StringComparison.OrdinalIgnoreCase))
 {
     // Driverless check: listen to Apple proximity advertisements (no pairing keys,
