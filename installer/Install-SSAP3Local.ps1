@@ -24,7 +24,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$PackageRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\package'),
+    # Defaults to <repository>\artifacts\package. (Resolved below: Windows
+    # PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults.)
+    [string]$PackageRoot,
     [string]$Version = '0.5.0',
     [switch]$EnableSpatialEngine,
     [switch]$Autostart
@@ -32,6 +34,7 @@ param(
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
+if (-not $PackageRoot) { $PackageRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\package' }
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
