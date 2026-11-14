@@ -8,10 +8,14 @@ using SSAP3.Core.Aacp;
 using SSAP3.Core.Connection;
 using SSAP3.Core.Conversation;
 using SSAP3.Core.Motion;
+using SSAP3.Core.Motion.Companion;
 using SSAP3.Core.Spatial;
 using SSAP3.Platform.Windows;
 
 namespace SSAP3.App.Services;
+
+/// <summary>Which motion provider Tracked mode uses, and how to reach a companion.</summary>
+internal sealed record MotionSourceSelection(MotionSourceKind Kind, string? CompanionHost, int CompanionPort);
 
 /// <summary>Immutable view of the service for the UI. Every field reflects observed state.</summary>
 internal sealed record ServiceSnapshot(
@@ -33,7 +37,10 @@ internal sealed record ServiceSnapshot(
     string? SpatialEngineError,
     LatencySummary DriverLatency,
     string DecoderName,
-    bool DecoderVerified);
+    bool DecoderVerified,
+    MotionSourceHealth Source,
+    TrackingStatus Tracking,
+    Vector3? SavedCalibration);
 
 /// <summary>
 /// SSAP3 Motion and control orchestration. One dedicated thread owns the
@@ -49,12 +56,10 @@ internal sealed class AirPodsService : IDisposable
     private static readonly TimeSpan DriverProbeInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StatePublishInterval = TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan UiPublishInterval = TimeSpan.FromMilliseconds(66);
-    private static readonly TimeSpan OwnsConnectionSettle = TimeSpan.FromMilliseconds(350);
 
     private readonly SynchronizationContext _ui;
     private readonly ConcurrentQueue<Action<TimeSpan>> _commands = new();
     private readonly ControlChannelSupervisor _supervisor = new();
-    private readonly MotionStreamMonitor _motion = new();
     private readonly ConversationModeController _conversation;
     private readonly AirPodsBatteryPacketParser _batteryParser = new();
     private readonly HeadPoseStateWriter _stateWriter = new();
@@ -64,9 +69,15 @@ internal sealed class AirPodsService : IDisposable
     private readonly Thread _thread;
     private volatile bool _stopping;
 
+    private readonly List<OrientationSample> _samples = new(64);
     private Ssap3DriverAacpClient? _client;
     private HeadPoseEstimator _estimator;
-    private IOrientationDecoder _decoder;
+    private AirPodsSensorMotionSource _sensorSource;
+    private IMotionSource _source;
+    private MotionSourceSelection _selection;
+    private bool _invertYaw;
+    private bool _invertPitch;
+    private Vector3? _savedCalibration;
     private string? _address;
     private string? _deviceName;
     private bool _driverPresent;
@@ -74,15 +85,11 @@ internal sealed class AirPodsService : IDisposable
     private SpatialEngineMode _spatialMode;
     private SoundstageSettings _stage;
     private bool _headTrackingEnabled = true;
-    private readonly MotionStreamController _motionStream = new();
     private bool _motionRequested;
-    private bool _ownsConnectionSent;
-    private TimeSpan _motionRequestedAt;
     private TimeSpan _lastLinkPoll = TimeSpan.Zero;
     private TimeSpan _lastDriverProbe = TimeSpan.Zero;
     private TimeSpan _lastStateWrite = TimeSpan.Zero;
     private TimeSpan _lastUiPublish = TimeSpan.Zero;
-    private TimeSpan _lastSampleTime;
     private AirPodsBatteryUpdate? _aacpBattery;
     private DateTimeOffset? _aacpBatteryAt;
 
@@ -92,7 +99,12 @@ internal sealed class AirPodsService : IDisposable
         _ui = SynchronizationContext.Current ?? new SynchronizationContext();
         _spatialMode = settings.SpatialMode;
         _stage = settings.Soundstage.Sanitized();
-        _decoder = new DeviceMotionOrientationDecoder(settings.InvertYaw);
+        _invertYaw = settings.InvertYaw;
+        _invertPitch = settings.InvertPitch;
+        _savedCalibration = settings.LateralAxisVector;
+        _selection = new MotionSourceSelection(settings.MotionSource, settings.CompanionHost, settings.CompanionPort);
+        _sensorSource = new AirPodsSensorMotionSource(_invertYaw, _invertPitch, _savedCalibration);
+        _source = CreateSource(_selection);
         _estimator = new HeadPoseEstimator(new HeadPoseEstimatorOptions { DriftCorrection = settings.DriftCorrection });
         _conversation = new ConversationModeController(new ConversationModeOptions
         {
@@ -119,13 +131,91 @@ internal sealed class AirPodsService : IDisposable
 
     public void Recenter() => Enqueue(_ => _estimator.RequestRecenter());
 
-    // invertPitch is kept for the settings contract; the decoder provides yaw only.
-    public void SetCalibration(bool invertYaw, bool invertPitch, bool driftCorrection) => Enqueue(_ =>
+    public void SetCalibration(bool invertYaw, bool invertPitch, bool driftCorrection) => Enqueue(now =>
     {
-        _decoder = new DeviceMotionOrientationDecoder(invertYaw);
         _estimator = new HeadPoseEstimator(new HeadPoseEstimatorOptions { DriftCorrection = driftCorrection });
-        _lastSampleTime = TimeSpan.Zero;
+        if (invertYaw != _invertYaw || invertPitch != _invertPitch)
+        {
+            _invertYaw = invertYaw;
+            _invertPitch = invertPitch;
+            _sensorSource.Configure(invertYaw, invertPitch);
+            ReplaceSource(_selection, now);
+        }
     });
+
+    /// <summary>Switches the motion provider without restarting the audio engine.</summary>
+    public void SetMotionSource(MotionSourceSelection selection) => Enqueue(now => ReplaceSource(selection, now));
+
+    /// <summary>Starts the guided nod calibration for pitch and roll on the active provider.</summary>
+    public void BeginPitchRollCalibration() => Enqueue(_ => _source.BeginCalibration());
+
+    /// <summary>Forgets the saved pitch/roll calibration.</summary>
+    public void ClearPitchRollCalibration() => Enqueue(now =>
+    {
+        _savedCalibration = null;
+        _sensorSource.Dispose();
+        _sensorSource = new AirPodsSensorMotionSource(_invertYaw, _invertPitch, null);
+        if (_channelSend is { } send)
+        {
+            _sensorSource.AttachChannel(send);
+        }
+
+        ReplaceSource(_selection, now);
+    });
+
+    private Action<byte[]>? _channelSend;
+
+    private IMotionSource CreateSource(MotionSourceSelection selection)
+    {
+        switch (selection.Kind)
+        {
+            case MotionSourceKind.Simulated:
+                return new SimulatedMotionSource(new SimulatedMotionOptions(), _invertYaw, _invertPitch, _savedCalibration);
+            case MotionSourceKind.Companion:
+                var key = CompanionPairingStore.Load();
+                if (string.IsNullOrWhiteSpace(selection.CompanionHost) || key is null)
+                {
+                    return new UnavailableMotionSource(
+                        MotionSourceKind.Companion,
+                        "No companion is paired. Create a pairing code and enter the companion's address in Settings > Head tracking.");
+                }
+
+                try
+                {
+                    return new CompanionMotionSource(selection.CompanionHost, selection.CompanionPort, key, () => MonotonicClock.Now, _invertYaw, _invertPitch, _savedCalibration);
+                }
+                finally
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
+                }
+
+            default:
+                return _sensorSource;
+        }
+    }
+
+    private void ReplaceSource(MotionSourceSelection selection, TimeSpan now)
+    {
+        var wasRunning = _motionRequested;
+        if (wasRunning)
+        {
+            _source.Stop();
+        }
+
+        if (!ReferenceEquals(_source, _sensorSource))
+        {
+            _source.Dispose();
+        }
+
+        _selection = selection;
+        _source = CreateSource(selection);
+        Ssap3AppLog.Write($"Motion provider: {_source.Kind}{(_source.IsSimulated ? " (simulated)" : string.Empty)}.");
+        if (wasRunning)
+        {
+            _estimator.Reset();
+            _source.Start(now);
+        }
+    }
 
     public void SetConversationAwareness(bool enabled) => Enqueue(_ => _conversation.Enabled = enabled);
 
@@ -144,6 +234,12 @@ internal sealed class AirPodsService : IDisposable
             Ssap3AppLog.Write("Motion thread did not stop within 3 s.");
         }
 
+        if (!ReferenceEquals(_source, _sensorSource))
+        {
+            _source.Dispose();
+        }
+
+        _sensorSource.Dispose();
         _stateWriter.Dispose();
     }
 
@@ -292,6 +388,8 @@ internal sealed class AirPodsService : IDisposable
                     _client.Send(AacpPacketFactory.CreateFeatureFlags());
                     _client.Send(AacpPacketFactory.CreateNotificationRequest());
                     _supervisor.OnSessionOpened();
+                    _channelSend = packet => _client?.Send(packet);
+                    _sensorSource.AttachChannel(_channelSend);
                     Ssap3AppLog.Write("AACP session initialised.");
                 }
                 catch (Exception exception) when (exception is IOException or Win32Exception or InvalidOperationException)
@@ -341,30 +439,13 @@ internal sealed class AirPodsService : IDisposable
 
     private void HandlePacket(byte[] data, TimeSpan receivedAt, TimeSpan now)
     {
-        // RTBuddy sensor channel (opcode 0x17): service announcements and motion reports.
-        if (SensorDataWx.TryParse(data, out var sensorMessage))
+        // RTBuddy sensor channel (opcode 0x17): announcements and motion reports.
+        var discovered = _sensorSource.DiscoveredService;
+        if (_sensorSource.OnPacket(data, receivedAt))
         {
-            if (sensorMessage.HasAnnouncement)
+            if (_sensorSource.DiscoveredService != discovered)
             {
-                var before = _motionStream.DiscoveredService;
-                _motionStream.OnAnnouncement(sensorMessage.AnnouncedService, sensorMessage.AnnouncementPayload);
-                if (_motionStream.DiscoveredService != before)
-                {
-                    Ssap3AppLog.Write($"AirPods announced the fused-motion service as ID {_motionStream.DiscoveredService}.");
-                }
-            }
-
-            if (_motionRequested &&
-                HeadTrackingFrameParser.TryParse(data, out var frame) &&
-                _motionStream.AcceptReport(frame.Service))
-            {
-                _motion.OnFrame(receivedAt);
-                if (_decoder.TryDecode(frame, out var orientation))
-                {
-                    var timestamp = receivedAt > _lastSampleTime ? receivedAt : _lastSampleTime + TimeSpan.FromTicks(2500);
-                    _lastSampleTime = timestamp;
-                    _estimator.AddSample(new OrientationSample(timestamp, orientation, _decoder.Info.ProvidesRoll));
-                }
+                Ssap3AppLog.Write($"AirPods announced the fused-motion service as ID {_sensorSource.DiscoveredService}.");
             }
 
             return;
@@ -419,7 +500,7 @@ internal sealed class AirPodsService : IDisposable
     private void UpdateMotion(TimeSpan now)
     {
         ApplyConversationDecision(_conversation.Tick(now));
-        var wanted = _spatialMode == SpatialEngineMode.Tracked && _headTrackingEnabled && _supervisor.State == ControlChannelState.Ready;
+        var wanted = _spatialMode == SpatialEngineMode.Tracked && _headTrackingEnabled;
         if (!wanted)
         {
             if (_motionRequested)
@@ -430,43 +511,25 @@ internal sealed class AirPodsService : IDisposable
             return;
         }
 
-        var client = _client;
-        if (client is null)
-        {
-            return;
-        }
-
         if (!_motionRequested)
         {
             _motionRequested = true;
-            _ownsConnectionSent = false;
-            _motionRequestedAt = now;
             _estimator.Reset();
-            _decoder.Reset();
-            _ = _motionStream.Stop(); // forget a session from a previous link
-            _lastSampleTime = TimeSpan.Zero;
-            _motion.Start(now);
+            _source.Start(now);
         }
 
-        if (!_ownsConnectionSent)
+        // Whichever provider is active delivers head-frame samples; the estimator does the rest.
+        _samples.Clear();
+        _source.Poll(now, _samples);
+        foreach (var sample in _samples)
         {
-            client.Send(AacpPacketFactory.CreateOwnsConnection(true));
-            _ownsConnectionSent = true;
-            return;
+            _estimator.AddSample(sample);
         }
 
-        if (now - _motionRequestedAt < OwnsConnectionSettle)
+        if (_source.SavedCalibration is { } axis && axis != _savedCalibration)
         {
-            return;
-        }
-
-        // Discovery, candidate fallback, lock-on and stall restarts (MotionStreamController).
-        var commands = _motionStream.IsRunning
-            ? _motionStream.Tick(now, _motion.Evaluate(now))
-            : _motionStream.Start(now);
-        foreach (var command in commands)
-        {
-            client.Send(command);
+            _savedCalibration = axis;
+            Ssap3AppLog.Write("Pitch/roll calibration saved.");
         }
     }
 
@@ -478,20 +541,15 @@ internal sealed class AirPodsService : IDisposable
         }
 
         _motionRequested = false;
-        _motion.Stop();
-        var commands = _motionStream.Stop();
-        try
-        {
-            foreach (var command in commands)
-            {
-                _client?.Send(command);
-            }
-        }
-        catch (Exception exception) when (exception is IOException or Win32Exception or InvalidOperationException)
-        {
-            // Stopping an optional stream on a dying link is harmless.
-        }
+        _source.Stop();
     }
+
+    /// <summary>Why the AirPods' own sensors cannot be used right now (shown when that provider is active).</summary>
+    private string DescribeSensorUnavailability() =>
+        _radio == BluetoothRadioState.Off ? "Bluetooth is off."
+        : _supervisor.Link != DeviceLink.Connected ? "The AirPods are not connected."
+        : !_driverPresent ? "The SSAP3 AAP driver is not installed. Windows only loads it once Microsoft has signed it (driver/SIGNING.md); use a companion device until then."
+        : "The AAP control channel is not open yet.";
 
     private void PublishEngineState(TimeSpan now)
     {
@@ -515,16 +573,24 @@ internal sealed class AirPodsService : IDisposable
         }
 
         _lastUiPublish = now;
-        var motionStatus = _motion.Evaluate(now);
+        if (_channelSend is null)
+        {
+            _sensorSource.DetachChannel(DescribeSensorUnavailability());
+        }
+
+        var health = _source.GetHealth(now);
+        var pose = _estimator.GetPose(now);
+        var sensorHealth = ReferenceEquals(_source, _sensorSource) ? health : _sensorSource.GetHealth(now);
+        var motionStatus = ToStreamStatus(_motionRequested && ReferenceEquals(_source, _sensorSource) ? sensorHealth.State : MotionSourceState.Stopped);
         var snapshot = new ServiceSnapshot(
-            DeviceStatus.From(_supervisor, motionStatus, _motion.FrameRateHz, _radio == BluetoothRadioState.Off),
+            DeviceStatus.From(_supervisor, motionStatus, sensorHealth.RateHz, _radio == BluetoothRadioState.Off),
             _deviceName,
             _address,
             _driverPresent,
-            _estimator.GetPose(now),
-            motionStatus,
-            _motion.FrameRateHz,
-            _motion.FramesReceived,
+            pose,
+            ToStreamStatus(_motionRequested ? health.State : MotionSourceState.Stopped),
+            health.RateHz,
+            health.SamplesReceived,
             _estimator.RejectedSampleCount,
             _listeningModes.ReportedMode,
             _aacpBattery,
@@ -534,10 +600,22 @@ internal sealed class AirPodsService : IDisposable
             HeadPoseStateWriter.IsEngineInstalled && _stateWriter.IsAvailable,
             _stateWriter.LastError,
             _driverLatency.Summarize(),
-            _decoder.Info.Name,
-            _decoder.Info.HardwareVerified);
+            health.Description,
+            DecoderVerified: false,
+            health,
+            TrackingStatusEvaluator.Evaluate(_spatialMode, _headTrackingEnabled, _motionRequested ? health : null, pose),
+            _savedCalibration);
         _ui.Post(_ => Updated?.Invoke(this, snapshot), null);
     }
+
+    private static MotionStreamStatus ToStreamStatus(MotionSourceState state) => state switch
+    {
+        MotionSourceState.Streaming => MotionStreamStatus.Streaming,
+        MotionSourceState.Stalled or MotionSourceState.Reconnecting => MotionStreamStatus.Stalled,
+        MotionSourceState.Failed => MotionStreamStatus.Unsupported,
+        MotionSourceState.Connecting or MotionSourceState.WaitingForData or MotionSourceState.Unavailable => MotionStreamStatus.WaitingForFirstFrame,
+        _ => MotionStreamStatus.Inactive,
+    };
 
     private Task SendPacketAsync(byte[] packet, CancellationToken cancellationToken)
     {
@@ -554,8 +632,6 @@ internal sealed class AirPodsService : IDisposable
     private void LoseSession(string reason, TimeSpan now)
     {
         var hadClient = _client is not null;
-        _motionRequested = false;
-        _motion.Stop();
         CloseClient();
         if (hadClient)
         {
@@ -572,6 +648,8 @@ internal sealed class AirPodsService : IDisposable
             _client = null;
         }
 
+        _channelSend = null;
+        _sensorSource.DetachChannel(DescribeSensorUnavailability());
         client?.Dispose();
     }
 }

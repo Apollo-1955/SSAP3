@@ -49,6 +49,7 @@ The full threat model (assets, trust boundaries TB1–TB8, STRIDE table) is in
 | S-28 | Low | The engine's `Device: AirPods` filter matched any device whose name contains "AirPods", such as a second pair | **Fixed** | Scoped to the endpoint GUIDs that Setup attached. |
 | S-29 | Medium | The driver forwarded **any** opcode-`0x17` payload from user mode, so a local process with access to the device could send arbitrary RTBuddy messages to the AirPods | **Fixed (compiled, CodeQL-clean in CI run #14)** | `Ssap3IsAllowedSensorSettingPacket`: only the documented sensor ServiceSetting command is allowed. Checks: exact body length, a 1–2-byte request id, service 1–127, mode 2, and interval 0 or 5 ms–1 s. A C# mirror of the rule is unit-tested against every command the app can emit. |
 | S-30 | Info | Inbound L2CAP MTU raised from 512 to 2582 bytes (iOS's value) so the AirPods announce their motion service | **Bounded** | Inbound and outbound limits are separate constants (outbound stays 512). Queue depth went from 32 to 16 (about 41 KB of `NonPagedPoolNx` per session, at most 4 sessions per device). Every copy is length-checked. Protocol bumped to v3. Compile-time size checks keep the C structures and the C# client in step. |
+| S-32 | Medium | New network surface: the optional companion motion connection (`docs/COMPANION_PROTOCOL.md`) | **Mitigated by design (loopback-tested)** | Off unless the user selects Companion and pairs. Controls:<br>- outbound only (no listening socket, no firewall rule);<br>- only loopback, private, link-local, CGNAT/Tailscale and IPv6 ULA/link-local addresses;<br>- mutual HMAC-SHA256 key proof over fresh nonces (constant-time);<br>- AES-256-GCM records with an HKDF session key and strictly increasing counters;<br>- fixed-size validated records, at most 400 per second;<br>- pairing key in DPAPI (current user, app entropy), never in settings or logs;<br>- simulated senders labelled.<br>Tested: tamper on every byte, replay, wrong key, public-address refusal, and loopback sessions. |
 | S-31 | Medium | The motion parser read fixed offsets inside a protobuf message, so it misread 80-byte packets | **Fixed** | `ProtobufReader` and `SensorDataWx.TryParse` are total and allocation-free. They reject overlong varints, unsupported wire types, field number 0, lengths past the end and service ids above 65535. Unit tests cover each case, and 200 000 randomized inputs run through the protobuf reader and the sensor parsers. |
 
 No **critical or high** finding is open in source. Several fixes are **not
@@ -67,7 +68,7 @@ release-verified, and a production release stays blocked.
 | Settings JSON (per user) | Same user | 64 KiB cap, typed deserialisation, range validation |
 | Installer and uninstaller | Administrators | Admin-only paths, ownership checks, manifest, rollback |
 | SoundVolumeView child process | App launches it | Installed path plus SHA-256 pin |
-| Network | **None** | No HTTP, socket or DNS APIs in the app, driver or DSP (source search) |
+| Network | Optional companion connection only (S-32) | Outbound TCP to a paired companion on a local or private address; no listening sockets; no HTTP. The driver and DSP have no network code. |
 
 ## 4. Privilege inventory
 
@@ -83,9 +84,11 @@ after setup.
 
 ## 5. Network, privacy and dependency inventory
 
-- **Network:** none at runtime. The build and CI download from nuget.org and
-  GitHub only. There is no update checker yet. When one is added it must be
-  opt-out, HTTPS-only, and send no device data.
+- **Network:** at runtime, only the optional companion connection (S-32). It
+  is outbound, local or private only, authenticated and encrypted. The build
+  and CI download from nuget.org and GitHub only. There is no update checker
+  yet. When one is added it must be opt-out, HTTPS-only, and send no device
+  data.
 - **Privacy:** no telemetry. Audio, microphone, motion data and Bluetooth
   identifiers stay local. Conversation switching uses the AirPods' own
   speaking notifications and records nothing.

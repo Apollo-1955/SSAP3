@@ -198,8 +198,27 @@ public partial class MainWindow : Window
     private void Service_OnUpdated(object? sender, ServiceSnapshot snapshot)
     {
         _snapshot = snapshot;
+        if (snapshot.SavedCalibration is { } axis && axis != _settings.LateralAxisVector)
+        {
+            _settings.LateralAxisVector = axis;
+            _settings.Save();
+        }
+
         RenderSnapshot(snapshot);
         _settingsWindow?.Render(snapshot);
+    }
+
+    internal void ApplyMotionSource()
+    {
+        _settings.Save();
+        _service.SetMotionSource(new MotionSourceSelection(_settings.MotionSource, _settings.CompanionHost, _settings.CompanionPort));
+    }
+
+    internal void ForgetPitchRollCalibration()
+    {
+        _settings.LateralAxisVector = null;
+        _settings.Save();
+        _service.ClearPitchRollCalibration();
     }
 
     private void RenderSnapshot(ServiceSnapshot snapshot)
@@ -283,40 +302,40 @@ public partial class MainWindow : Window
         }
         else
         {
+            var trackingStatus = snapshot.Tracking;
             SpatialStatusText.Text = snapshot.SpatialMode switch
             {
                 SpatialEngineMode.Off => "Off: audio is passed through unchanged.",
-                SpatialEngineMode.Fixed => "Virtual speakers in front of you.",
-                _ when !controlsReady => "Head tracking needs the AAP driver: rendering a fixed soundstage.",
-                _ => snapshot.Status.Kind switch
-                {
-                    DeviceStatusKind.MotionStreaming => "Speakers stay anchored to your monitor.",
-                    DeviceStatusKind.MotionStalled => "Motion stalled: holding the stage, then easing to centre.",
-                    DeviceStatusKind.MotionUnsupported => "No motion data from the AirPods: fixed soundstage.",
-                    _ => "Starting head tracking…",
-                },
+                SpatialEngineMode.Fixed => "Virtual speakers in front of you. Head movement is ignored.",
+                _ => trackingStatus.Detail is { Length: > 0 } detail ? $"{trackingStatus.Summary}. {detail}" : trackingStatus.Summary,
             };
             MotionBadge.Text = snapshot.SpatialMode switch
             {
                 SpatialEngineMode.Off => "OFF",
                 SpatialEngineMode.Fixed => "FIXED",
-                _ => snapshot.Motion == MotionStreamStatus.Streaming ? "LIVE" : "WAIT",
+                _ => trackingStatus.Kind switch
+                {
+                    TrackingStatusKind.Live => trackingStatus.IsSimulated ? "SIM" : "LIVE",
+                    TrackingStatusKind.Unavailable => "N/A",
+                    TrackingStatusKind.Degraded or TrackingStatusKind.Lost or TrackingStatusKind.Recovering => "HOLD",
+                    _ => "WAIT",
+                },
             };
         }
 
         var pose = snapshot.Pose;
-        var tracking = snapshot.SpatialMode == SpatialEngineMode.Tracked && pose.Calibrated && snapshot.Motion != MotionStreamStatus.Inactive;
-        PoseText.Text = tracking
-            ? $"Yaw {pose.YawDegrees,6:+0.0;-0.0}°   Pitch {pose.PitchDegrees,6:+0.0;-0.0}°"
-            : "Yaw —   Pitch —";
-        MotionDetailText.Text = snapshot.Motion switch
-        {
-            MotionStreamStatus.Streaming => $"{snapshot.MotionRateHz:0} Hz · {pose.State} · decoder {(snapshot.DecoderVerified ? "verified" : "unverified")}",
-            MotionStreamStatus.WaitingForFirstFrame => "Waiting for the first motion packet…",
-            MotionStreamStatus.Stalled => "Motion packets stopped. Recovering…",
-            MotionStreamStatus.Unsupported => "The AirPods did not stream motion.",
-            _ => "Head tracking off",
-        };
+        var tracking = snapshot.SpatialMode == SpatialEngineMode.Tracked && pose.Calibrated &&
+            snapshot.Tracking.Kind is TrackingStatusKind.Live or TrackingStatusKind.Degraded or TrackingStatusKind.Lost;
+        PoseText.Text = !tracking ? "Yaw —   Pitch —"
+            : snapshot.Source.ProvidesPitchRoll
+                ? $"Yaw {pose.YawDegrees,6:+0.0;-0.0}°   Pitch {pose.PitchDegrees,6:+0.0;-0.0}°   Roll {pose.RollDegrees,5:+0;-0}°"
+                : $"Yaw {pose.YawDegrees,6:+0.0;-0.0}°   (pitch/roll need calibration)";
+        var source = snapshot.Source;
+        MotionDetailText.Text = snapshot.SpatialMode != SpatialEngineMode.Tracked
+            ? "Head tracking off"
+            : source.State == MotionSourceState.Streaming
+                ? $"{(source.IsSimulated ? "SIMULATED · " : string.Empty)}{source.Description} · {source.RateHz:0} Hz · {pose.State}"
+                : source.Problem ?? source.Description;
         RecenterButton.IsEnabled = tracking;
         DrawStage(snapshot, tracking ? pose.YawDegrees : 0f);
     }

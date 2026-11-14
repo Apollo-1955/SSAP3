@@ -44,7 +44,10 @@ The status legend:
 | Area | Implemented | Tested (simulated) | Executed on this PC | Hardware-verified |
 | --- | --- | --- | --- | --- |
 | Managed build, 0 warnings, security analyzers | ✓ | n/a | ✓ | n/a |
-| Core tests (158) | ✓ | ✓ | ✓ | — |
+| Core tests (186) | ✓ | ✓ | ✓ | — |
+| Motion providers (AirPods sensors, companion, simulator) and tracking states | ✓ | ✓ (simulator end to end; companion over loopback TCP) | — (new app build not yet installed) | — (no signed driver, no companion app) |
+| Pitch/roll nod calibration | ✓ | ✓ (arbitrary simulated mountings) | — | — |
+| Windows motion-access investigation | ✓ | n/a | ✓ (`--investigate`: no user-mode path; see `docs/TECHNICAL_REPORT.md` §2) | n/a |
 | Motion protocol (SensorDataWX protobuf, quaternion yaw, service discovery, MTU 2582) | ✓ | ✓ (synthetic packets in the documented layout; byte-exact vs 6 published commands) | — (needs the signed driver) | — |
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |

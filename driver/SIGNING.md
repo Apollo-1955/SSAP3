@@ -13,6 +13,33 @@ Microsoft's documentation, last checked on 2026-11-13:
 - [Driver signing options](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
 - [Register for the Windows Hardware Developer Program](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/hardware-program-register)
 
+## Checklist
+
+**Status key:** ✅ done in this repository · ⬜ needs the maintainer's
+organization and credentials. Nothing below may be faked: no borrowed
+certificates, no impersonated organizations, and nothing described as
+Microsoft-signed until Microsoft has signed it.
+
+| # | Item | Status |
+| --- | --- | --- |
+| 1 | Registered legal organization (company or registered sole proprietorship, as the CA accepts) with a legal contact who can sign agreements | ⬜ |
+| 2 | EV code-signing certificate issued to that organization (hardware token or cloud key store) | ⬜ |
+| 3 | Microsoft Entra ID tenant with a global administrator account (free to create during registration) | ⬜ |
+| 4 | Windows Hardware Developer Program registration: company details or D-U-N-S, legal-contact email verification, EV certificate uploaded, business questionnaire answered | ⬜ |
+| 5 | Driver builds under `/W4 /WX /guard:cf` with a PDB | ✅ CI |
+| 6 | INF passes InfVerif `/w` | ✅ CI |
+| 7 | HVCI-relevant image checks (`driver/Test-DriverImage.ps1`) | ✅ CI |
+| 8 | Microsoft `microsoft/windows-drivers` 1.10.0 CodeQL suites: 0 must-fix, 0 recommended | ✅ CI |
+| 9 | Inf2Cat signability test (catalog generated) | ✅ CI |
+| 10 | Attestation CAB in the required layout (`ssap3aap\` with `.sys`, `.inf`, `.pdb`, `.cat`) | ✅ CI artifact `ssap3-driver-attestation-cab-unsigned` |
+| 11 | CAB signed with the EV certificate | ⬜ |
+| 12 | Submitted in Partner Center (test-signing options unchecked); signed package downloaded | ⬜ |
+| 13 | Catalog signer verified as "Microsoft Windows Hardware Compatibility Publisher" | ⬜ (checked automatically by Setup) |
+| 14 | First load on hardware with a restore point (Driver Verifier optional); `SSAP3-TransportProbe <address> Motion` passes | ⬜ |
+| 15 | Driver Verifier and HVCI runtime test on hardware | ⬜ |
+
+Steps 11–15 are described below.
+
 ## What to expect
 
 - **Attestation signing is the realistic route.** Windows 10 and 11 desktop

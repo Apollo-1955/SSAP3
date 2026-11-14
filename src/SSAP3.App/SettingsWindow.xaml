@@ -110,6 +110,46 @@
                     </Border>
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
+                            <TextBlock Text="Motion source" Style="{StaticResource Heading}" />
+                            <RadioButton x:Name="SourceSensorsRadio" GroupName="MotionSource" Foreground="#F8FAFF" Margin="0,3"
+                                         Content="AirPods motion sensors (needs the Microsoft-signed SSAP3 driver)" Click="MotionSource_OnChanged" />
+                            <RadioButton x:Name="SourceCompanionRadio" GroupName="MotionSource" Foreground="#F8FAFF" Margin="0,3"
+                                         Content="Companion device that reads the AirPods (iPhone, iPad, Mac or Linux bridge)" Click="MotionSource_OnChanged" />
+                            <RadioButton x:Name="SourceSimulatedRadio" GroupName="MotionSource" Foreground="#FFC86B" Margin="0,3"
+                                         Content="Simulated motion (development only, NOT real head tracking)" Click="MotionSource_OnChanged" />
+                            <StackPanel x:Name="CompanionPanel" Margin="22,6,0,0">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="Address" FontSize="12" VerticalAlignment="Center" Width="60" />
+                                    <TextBox x:Name="CompanionHostBox" Width="200" MaxLength="253" />
+                                    <TextBlock Text="Port" FontSize="12" VerticalAlignment="Center" Margin="10,0,6,0" />
+                                    <TextBox x:Name="CompanionPortBox" Width="60" MaxLength="5" />
+                                    <Button Content="Apply" Style="{StaticResource QuietButtonStyle}" Margin="8,0,0,0" Click="CompanionApply_OnClick" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button Content="Create pairing code" Style="{StaticResource QuietButtonStyle}" Click="CreatePairing_OnClick" />
+                                    <Button Content="Unpair" Style="{StaticResource QuietButtonStyle}" Margin="8,0,0,0" Click="Unpair_OnClick" />
+                                </StackPanel>
+                                <TextBox x:Name="PairingCodeBox" IsReadOnly="True" FontFamily="Cascadia Mono, Consolas" FontSize="12" Margin="0,8,0,0" Visibility="Collapsed" />
+                                <TextBlock x:Name="PairingStatusText" Style="{StaticResource Note}" Margin="0,6,0,0" />
+                            </StackPanel>
+                            <TextBlock Style="{StaticResource Note}" Margin="0,8,0,0"
+                                       Text="Windows does not let normal apps open the AirPods' motion channel (checked on this PC: user-mode L2CAP refused, the AAP node cannot be opened, no LE, HID or sensor exposure). The AirPods option needs SSAP3's kernel driver, which Windows loads only once Microsoft has signed it. A companion that can read the AirPods sends orientation over an encrypted, paired connection to this PC; SSAP3 connects out to it and only on your local network." />
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Text="Pitch and roll" Style="{StaticResource Heading}" />
+                            <TextBlock Style="{StaticResource Note}" Margin="0,0,0,8"
+                                       Text="Yaw works straight away. For pitch and roll, face your screen, press Calibrate, then look UP first and nod three or four times within four seconds. The result is saved for this fit of the AirPods." />
+                            <StackPanel Orientation="Horizontal">
+                                <Button x:Name="CalibrateButton" Content="Calibrate pitch and roll" Style="{StaticResource QuietButtonStyle}" Click="Calibrate_OnClick" />
+                                <Button Content="Forget calibration" Style="{StaticResource QuietButtonStyle}" Margin="8,0,0,0" Click="ForgetCalibration_OnClick" />
+                            </StackPanel>
+                            <TextBlock x:Name="CalibrationStatusText" Style="{StaticResource Note}" Margin="0,8,0,0" />
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
                             <TextBlock Text="Calibration" Style="{StaticResource Heading}" />
                             <CheckBox x:Name="HeadTrackingCheck" Content="Use AirPods head tracking in Head tracked mode" Click="Calibration_OnChanged" />
                             <CheckBox x:Name="DriftCheck" Content="Drift correction (slowly re-centres small, steady offsets)" Click="Calibration_OnChanged" />
@@ -172,7 +212,7 @@
                             <TextBlock Style="{StaticResource Note}" Margin="0,0,0,8"
                                        Text="Security: SSAP3 never asks you to disable Secure Boot, Memory Integrity, Defender or driver signature enforcement, and never installs trust certificates." />
                             <TextBlock Style="{StaticResource Note}"
-                                       Text="Privacy: no account, cloud, telemetry or network access. Audio, motion and Bluetooth identifiers stay on this PC. AirPods and Apple are trademarks of Apple Inc.; SSAP3 is not affiliated with Apple." />
+                                       Text="Privacy: no account, cloud or telemetry. Audio and Bluetooth identifiers stay on this PC. The only network use is the optional companion connection, which SSAP3 opens to a paired device on your local network and encrypts. AirPods and Apple are trademarks of Apple Inc.; SSAP3 is not affiliated with Apple." />
                         </StackPanel>
                     </Border>
                 </StackPanel>

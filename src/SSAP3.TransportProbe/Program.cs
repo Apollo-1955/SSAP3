@@ -12,6 +12,13 @@ if (args.Length >= 1 && args[0].Equals("--investigate", StringComparison.Ordinal
     return SSAP3.TransportProbe.MotionAccessInvestigation.RunAsync(args.Length > 1 ? args[1] : null).GetAwaiter().GetResult();
 }
 
+if (args.Length >= 1 && args[0].Equals("--companion-sim", StringComparison.OrdinalIgnoreCase))
+{
+    var simPort = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? Math.Clamp(parsedPort, 1024, 65535) : SSAP3.Core.Motion.Companion.CompanionProtocol.DefaultPort;
+    var simSeconds = args.Length > 2 && int.TryParse(args[2], out var parsedSeconds) ? Math.Clamp(parsedSeconds, 5, 3600) : 300;
+    return SSAP3.TransportProbe.CompanionSimulatorServer.Run(simPort, simSeconds);
+}
+
 if (args.Length >= 1 && args[0].Equals("--ble", StringComparison.OrdinalIgnoreCase))
 {
     // Driverless check: listen to Apple proximity advertisements (no pairing keys,

@@ -2,6 +2,30 @@
 
 ## SSAP3 0.5.0-dev (unreleased, branch `development/ssap3`)
 
+- **Motion providers** (`docs/TECHNICAL_REPORT.md`). Tracked mode now runs on
+  a provider interface (`IMotionSource`) with three implementations:
+  - AirPods sensors over the AAP driver;
+  - an authenticated, encrypted **companion** device
+    (`docs/COMPANION_PROTOCOL.md`);
+  - a clearly labelled **simulator** for development.
+
+  Providers can be switched in Settings without restarting the audio engine.
+- **Tracking states.** Tracked mode always shows an explicit state: Off,
+  Fixed, Unavailable (with the reason), Starting, Live, Degraded, Lost or
+  Recovering. It shows whether measurements are real or simulated, and it
+  never silently behaves like Fixed.
+- **Pitch and roll** from a guided nod calibration, saved per fit and
+  rejected if the fit changes.
+- **Diagnostics** show:
+  - provider, real vs simulated, and state;
+  - last measurement age, rate and transport delay;
+  - calibration;
+  - errors.
+- `SSAP3-TransportProbe --investigate`: a read-only check of every Windows
+  interface for AirPods motion access. `--companion-sim`: a simulated
+  reference companion.
+- `driver/SIGNING.md` now has a full signing checklist.
+
 - **Head tracking decoder rebuilt from the documented motion protocol**
   (`HARDWARE_COMPATIBILITY.md`, *Motion protocol*):
   - motion packets are parsed as RTBuddy SensorDataWX protobuf. The old fixed

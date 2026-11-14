@@ -81,6 +81,51 @@ public interface IMotionSource : IDisposable
     Vector3? SavedCalibration { get; }
 }
 
+/// <summary>A provider that cannot run (for example an unconfigured companion); it only reports why.</summary>
+public sealed class UnavailableMotionSource : IMotionSource
+{
+    private readonly string _problem;
+    private bool _running;
+
+    public UnavailableMotionSource(MotionSourceKind kind, string problem)
+    {
+        Kind = kind;
+        _problem = problem;
+    }
+
+    public MotionSourceKind Kind { get; }
+
+    public bool IsSimulated => false;
+
+    public Vector3? SavedCalibration => null;
+
+    public void Start(TimeSpan now) => _running = true;
+
+    public void Stop() => _running = false;
+
+    public void Poll(TimeSpan now, ICollection<OrientationSample> samples)
+    {
+    }
+
+    public bool BeginCalibration() => false;
+
+    public MotionSourceHealth GetHealth(TimeSpan now) => new(
+        Kind,
+        _running ? MotionSourceState.Unavailable : MotionSourceState.Stopped,
+        IsSimulated: false,
+        Kind.ToString(),
+        _problem,
+        0,
+        null,
+        0,
+        0,
+        false,
+        HeadAxisCalibrationState.None,
+        null);
+
+    public void Dispose() => Stop();
+}
+
 /// <summary>
 /// The AirPods' own sensors over the AAP channel. The caller owns the AACP
 /// session: it attaches a send delegate when the channel is ready, forwards

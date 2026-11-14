@@ -33,6 +33,26 @@ public sealed class Ssap3UserSettings
 
     public bool DriftCorrection { get; set; } = true;
 
+    /// <summary>Tracked-mode motion provider. Simulated is a labelled development option.</summary>
+    public SSAP3.Core.Motion.MotionSourceKind MotionSource { get; set; } = SSAP3.Core.Motion.MotionSourceKind.AirPodsSensors;
+
+    /// <summary>Companion address (local network only; validated when connecting).</summary>
+    public string? CompanionHost { get; set; }
+
+    public int CompanionPort { get; set; } = SSAP3.Core.Motion.Companion.CompanionProtocol.DefaultPort;
+
+    /// <summary>Calibrated lateral axis in the bud's sensor frame (x, y, z), or null.</summary>
+    public float[]? LateralAxis { get; set; }
+
+    [JsonIgnore]
+    public System.Numerics.Vector3? LateralAxisVector
+    {
+        get => LateralAxis is { Length: 3 } axis && axis.All(float.IsFinite) && new System.Numerics.Vector3(axis[0], axis[1], axis[2]).Length() is > 0.5f and < 1.5f
+            ? new System.Numerics.Vector3(axis[0], axis[1], axis[2])
+            : null;
+        set => LateralAxis = value is { } axis ? [axis.X, axis.Y, axis.Z] : null;
+    }
+
     public bool ConversationAwarenessEnabled { get; set; }
 
     public int ConversationSilenceSeconds { get; set; } = 6;
@@ -87,6 +107,10 @@ public sealed class Ssap3UserSettings
         SpatialMode = Enum.IsDefined(SpatialMode) ? SpatialMode : SpatialEngineMode.Off;
         Soundstage = (Soundstage ?? SoundstageSettings.Default).Sanitized();
         ConversationSilenceSeconds = Math.Clamp(ConversationSilenceSeconds, 2, 60);
+        MotionSource = Enum.IsDefined(MotionSource) ? MotionSource : SSAP3.Core.Motion.MotionSourceKind.AirPodsSensors;
+        CompanionHost = CompanionHost?.Trim() is { Length: > 0 and <= 253 } host && !host.Any(char.IsWhiteSpace) ? host : null;
+        CompanionPort = CompanionPort is >= 1024 and <= 65535 ? CompanionPort : SSAP3.Core.Motion.Companion.CompanionProtocol.DefaultPort;
+        LateralAxisVector = LateralAxisVector;
         LastCaseBattery = LastCaseBattery is { } level ? Math.Clamp(level, 0, 100) : null;
         return this;
     }
