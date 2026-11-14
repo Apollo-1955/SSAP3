@@ -78,21 +78,47 @@ try {
         if ($owner -notin $trustedOwners) { throw "$installRoot exists but is owned by $owner. Remove it as an administrator first." }
     }
 
-    # Stop SSAP3 processes started from the install folder (never by name: S-15).
+    # Stop SSAP3 processes started from the install folder (never by name: S-15),
+    # then wait until they have exited: Stop-Process returns before Windows
+    # releases the program file, and copying over it fails while it is locked.
     $prefix = $installRoot.TrimEnd('\') + '\'
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
+    foreach ($process in $running) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline -and @($running | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }).Count -gt 0) {
+        Start-Sleep -Milliseconds 200
+    }
+    $stillRunning = @($running | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+    if ($stillRunning.Count -gt 0) {
+        throw "SSAP3 (process $($stillRunning[0].ProcessId)) did not exit. Close it, then run this again."
+    }
+
+    # A file can stay locked for a moment after its process exits (for example
+    # while antivirus scans it), so a locked copy is retried a few times.
+    function Copy-Ssap3PackageItem([string]$Path, [string]$Destination) {
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Copy-Item -Path $Path -Destination $Destination -Recurse -Force -ErrorAction Stop
+                return
+            }
+            catch {
+                if ($_.Exception -isnot [System.IO.IOException] -or $attempt -ge 5) { throw }
+                Write-Output "A file is still in use; retrying ($attempt of 4) ..."
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
 
     Write-Output "Copying the package to $installRoot ..."
     New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
-    Copy-Item -Path (Join-Path $PackageRoot 'app\*') -Destination $installRoot -Recurse -Force
+    Copy-Ssap3PackageItem -Path (Join-Path $PackageRoot 'app\*') -Destination $installRoot
     foreach ($folder in 'setup', 'spatial', 'driver', 'docs') {
         $source = Join-Path $PackageRoot $folder
         if (Test-Path -LiteralPath $source -PathType Container) {
             $target = Join-Path $installRoot $folder
             New-Item -ItemType Directory -Force -Path $target | Out-Null
-            Copy-Item -Path (Join-Path $source '*') -Destination $target -Recurse -Force
+            Copy-Ssap3PackageItem -Path (Join-Path $source '*') -Destination $target
         }
     }
 
