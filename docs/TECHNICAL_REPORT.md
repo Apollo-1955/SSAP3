@@ -209,8 +209,11 @@ difference (ITD, onset at 15 % of peak) of the rendered responses, at
 - These are engine 2.6.0 values. The 2.7.0 timbre correction:
   - leaves the ITD unchanged;
   - moves the ILD by at most 0.2 dB (0.9 dB at 150°);
-  - lowers the front/back difference to about 3.8 dB, because the 8 kHz
-    notch is partly filled (design check).
+  - lowers the front/back difference to 3.75 dB, because the 8 kHz notch is
+    partly filled.
+
+  CI run #23 confirmed this: -30° measures 9.51 dB / 0.229 ms, and -90°
+  measures 14.78 dB / 0.688 ms.
 
 | Head-relative direction | ILD | ITD (right ear leads) |
 | --- | --- | --- |
@@ -271,7 +274,17 @@ Settings → Soundstage → **Renderer**: *Measured* (the default) or *Classic*.
 - **No clicks when switching:** both renderers run every sample, so the
   newly selected one has no cold start. A change crossfades over one audio
   block. CI checks this with a measured → classic → measured switch.
-- **Cost:** the CI real-time test runs with both renderers active (§5.2).
+- **Cost:** CI run #23 measured **1.1 % of one core** at 48 kHz, with both
+  renderers active and the head turning continuously.
+- **The engine's own measurements (CI run #23):**
+  - measured renderer: stage bass -0.4 dB relative to the mid-range;
+    1/3-octave bands from 40 Hz to 12.5 kHz within -4.3/+1.3 dB;
+  - ILD/ITD at -30°: -9.51 dB / -0.229 ms; at -90°: -14.78 dB / -0.688 ms;
+  - front/back: 3.75 dB;
+  - classic renderer at -30°: ILD -8.2 dB, ITD -0.333 ms;
+  - level for broadband noise: 5.8 dB below the input (1.4 dB lower than
+    2.6.0, which keeps headroom for the restored bass);
+  - head sweep and renderer switches: no clicks.
 
 ## 6. Security
 

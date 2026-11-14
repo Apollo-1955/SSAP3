@@ -74,6 +74,8 @@ The status legend:
 | #18 | `d93db80` | HRIR renderer. The engine failed to compile: a `static_assert` assumed every KEMAR ring ends at 180°, but the 50° ring ends at 176°. The lookup now bridges 176–184° with the mirror image (no seam behind the head). Build diagnostics are now published as annotations. |
 | #19 | `40f968f` | Spatial engine and CodeQL C/C++ **green**, with every HRIR, click and real-time test passing. The managed tests failed on a pre-existing flaky test: the pairing-code check failed for the ~19 % of random keys whose code has no `A`. Fixed and made deterministic; failed tests are now named in annotations. |
 | #20 | `7515eff` | **All jobs green** with the measured-HRIR renderer, including spatial-engine tests and CodeQL (C/C++, C#, driver). Engine measurements were identical to #19; real-time factor 0.013. |
+| #22 | `14d8a5a` | Engine 2.7.0 (timbre correction, Classic/Measured switch). The engine built and passed CodeQL. The test program did not compile, because its `near`/`far` parameter names are empty macros in `windows.h`; they were renamed. |
+| #23 | `275d029` | **All jobs green.** Results: stage bass -0.4 dB; 1/3-octave balance -4.3/+1.3 dB; cues unchanged; classic renderer, invalid-renderer rejection and switch-click tests pass; 1.1 % of one core. |
 | #14 | `99ed229` | **All jobs green** after the motion-protocol rewrite and driver protocol v3. Covers MTU 2582, the `0x17` allowlist and the structure-size checks. Results: 158 tests pass, Microsoft's driver CodeQL suites are clean, and the attestation CAB was rebuilt. |
 
 ## Blockers (need the maintainer)
