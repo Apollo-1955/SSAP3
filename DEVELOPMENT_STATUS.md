@@ -48,7 +48,7 @@ The status legend:
 | App launch, status rendering, `--tray` | ✓ | — | ✓ (Bluetooth off, no driver) | — |
 | BLE advertisement probe | ✓ | — | ✓ (radio off, so 0 advertisements) | — |
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
-| Driver (C) | ✓ | compiles, links, passes InfVerif (CI run #4); not loaded or run anywhere | ✗ (no WDK locally) | — |
+| Driver (C) | ✓ | compiles, links, passes InfVerif, the HVCI image checks, Microsoft's driver CodeQL suites and Inf2Cat; submission CAB built (CI run #12). Not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
 | Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; the app writes fresh state (≈200 ms old, engine limit 750 ms) | **Fixed mode ✓:** the user heard a clear difference between Off and Fixed on AirPods Pro 3 (subjective listening test, 2026-11-13; state record confirmed `Mode=Fixed`). Tracked mode not verified (needs the signed AAP driver) |
 | Package staging (`build-installer.ps1 -StageOnly`) | ✓ | — | ✓ (app published, SBOM written; engine DLL not yet present) | n/a |
@@ -63,6 +63,8 @@ The status legend:
 | #2 | `fda1a94` | Managed job green. The spatializer test failed to compile (`C2589`: the `windows.h` `max` macro shadowed `std::max`). Driver failed with no detail. |
 | #3 | `d56b0d3` | Spatial engine built and passed all tests. Driver: `queue.c(230)` `C4018` signed/unsigned compare against `FIELD_OFFSET`, fatal under `/WX`. |
 | #4 | `f3cf186` | **All jobs green:** managed build and 115 tests, NuGet audit, spatial engine build and tests, driver compile, link and InfVerif, CodeQL C# and C/C++, gitleaks, script checks. |
+| #9–#11 | `99555e1`–`dcf93eb` | New driver pre-submission jobs, fixed one by one:<br>- source scan read a build folder;<br>- the `microsoft/cpp-queries` dependency wasn't downloaded;<br>- no PDB was produced (now `/Z7` + `/DEBUG`);<br>- the CAB check misread `expand -D` output;<br>- 2 role-type warnings. |
+| #12 | `7da096c` | **All jobs green**, including driver image checks, Microsoft's driver CodeQL suites (0 must-fix, 0 recommended), Inf2Cat and the attestation CAB artifact. |
 
 ## Blockers (need the maintainer)
 
