@@ -13,7 +13,7 @@ what is **blocked**. Simulated results are never reported as real tracking.
 | Tracked mode, AirPods sensors over SSAP3's driver | **Implemented, blocked on Microsoft signing.** The driver package is submission-ready (`driver/SIGNING.md`). The motion decoder follows the published protocol but is unverified on AirPods Pro 3. |
 | Tracked mode, companion device | **Implemented on Windows** (authenticated, encrypted, tested over loopback). No real companion app exists yet. One hardware question is open (§3.3). |
 | Pitch and roll | **Implemented** with a guided nod calibration. Tested with simulated mountings. |
-| HRTF rendering | Two renderers, switchable while listening (§5.5):<br>- **Measured:** HRIR convolution (MIT KEMAR dummy head), interpolated across 710 directions, crossfaded on every update and timbre-corrected;<br>- **Classic:** the earlier parametric model.<br>Both add a compact room and render full 3-D head orientation. The first listening test of the uncorrected measured renderer (engine 2.6.0) was negative (thin, harsh or muffled, wrong space). Engine 2.7.0 adds the timbre correction and the switch, and **has not been heard yet**. SOFA import is not implemented. |
+| HRTF rendering | Two renderers, switchable while listening (§5.5):<br>- **Measured:** HRIR convolution (MIT KEMAR dummy head), interpolated across 710 directions, crossfaded on every update and timbre-corrected;<br>- **Classic:** the earlier parametric model.<br>Both add a compact room and render full 3-D head orientation. The first listening test of the uncorrected measured renderer (engine 2.6.0) was negative (thin, harsh or muffled, wrong space). Engine 2.7.0 adds the timbre correction and the switch. **Heard on AirPods Pro 3 and judged good** (Fixed mode, subjective, 2026-11-14). SOFA import is not implemented. |
 
 ## 2. Motion access on Windows (measured on the development PC)
 
@@ -259,9 +259,13 @@ difference (ITD, onset at 15 % of peak) of the rendered responses, at
   - space that felt wrong.
 
   The first two match the measured deviations in step 5 above. Engine 2.7.0
-  has not been heard yet. Spatial impressions from a generic head vary from
-  person to person, which is why the classic renderer stays one click away
-  (§5.5).
+  was heard on 2026-11-14 in Fixed mode. The user compared it with Classic
+  using the switch and found **Measured good**. This is a subjective
+  listening test by one person, not a measurement.
+
+  Spatial impressions from a generic head vary from person to person, which
+  is why the classic renderer stays one click away (§5.5). Head-tracked
+  rendering is still unverified, because it needs the signed driver.
 
 ### 5.5 Renderer choice
 
