@@ -446,8 +446,9 @@ struct ToneBalance
 };
 
 // Power response at one ear for uncorrelated stereo (near + far speaker),
-// 1/3-octave smoothed, relative to its 300 Hz - 3 kHz mean.
-ToneBalance StageTone(const std::vector<float>& near, const std::vector<float>& far, double sampleRate)
+// 1/3-octave smoothed, relative to its 300 Hz - 3 kHz mean. (Not "near" and
+// "far": windows.h defines both as empty macros.)
+ToneBalance StageTone(const std::vector<float>& nearSpeaker, const std::vector<float>& farSpeaker, double sampleRate)
 {
     std::vector<std::pair<double, double>> bands;
     for (double centre = 31.5; centre <= 16500.0; centre *= std::pow(2.0, 1.0 / 3.0))
@@ -457,7 +458,7 @@ ToneBalance StageTone(const std::vector<float>& near, const std::vector<float>& 
         for (double frequency = centre * std::pow(2.0, -1.0 / 6.0); frequency <= centre * std::pow(2.0, 1.0 / 6.0);
              frequency *= std::pow(2.0, 1.0 / 24.0))
         {
-            power += PowerAt(near, frequency, sampleRate) + PowerAt(far, frequency, sampleRate);
+            power += PowerAt(nearSpeaker, frequency, sampleRate) + PowerAt(farSpeaker, frequency, sampleRate);
             ++count;
         }
         bands.emplace_back(centre, power / std::max(count, 1));
