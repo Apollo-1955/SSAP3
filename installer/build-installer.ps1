@@ -68,7 +68,7 @@ if ((Get-FileHash -LiteralPath $svv -Algorithm SHA256).Hash -ne 'B5AF5BD60F7A29A
     throw 'SoundVolumeView.exe does not match the pinned SHA-256 in THIRD_PARTY.md.'
 }
 
-foreach ($file in 'Install-SSAP3.ps1', 'Uninstall-SSAP3.ps1', 'Ssap3Setup.psm1', 'Test-Ssap3SystemState.ps1') {
+foreach ($file in 'Install-SSAP3.ps1', 'Uninstall-SSAP3.ps1', 'Ssap3Setup.psm1', 'Test-Ssap3SystemState.ps1', 'Test-Ssap3Driver.ps1') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $packageRoot 'setup') -Force
 }
 foreach ($file in 'LICENSE', 'THIRD_PARTY.md', 'README.md', 'SECURITY.md') {
@@ -77,10 +77,18 @@ foreach ($file in 'LICENSE', 'THIRD_PARTY.md', 'README.md', 'SECURITY.md') {
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\INSTALL.md') -Destination (Join-Path $packageRoot 'docs') -Force
 
 if ($SignedDriverFolder) {
+    # The same rule Setup applies at install time (Ssap3Setup.psm1): Microsoft's
+    # driver-publisher signature pinned to a Microsoft root, and the catalog
+    # must list exactly these .sys and .inf files.
+    Import-Module (Join-Path $PSScriptRoot 'Ssap3Setup.psm1') -Force -DisableNameChecking -WarningAction SilentlyContinue
     $catalog = Join-Path $SignedDriverFolder 'ssap3aap.cat'
-    $signature = Get-AuthenticodeSignature -LiteralPath $catalog
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Windows Hardware Compatibility Publisher') {
-        throw "The driver catalog is not Microsoft-signed ($($signature.Status)). Production packages only carry attestation/WHQL-signed drivers."
+    $members = @((Join-Path $SignedDriverFolder 'ssap3aap.sys'), (Join-Path $SignedDriverFolder 'ssap3aap.inf'))
+    if (-not (Test-Ssap3DriverProductionSigned -CatalogPath $catalog -MemberPaths $members)) {
+        $signature = Get-Ssap3CatalogSignature -CatalogPath $catalog
+        throw "The driver package is not Microsoft-signed for these files (catalog: $($signature.Kind); $($signature.Detail)). Production packages only carry attestation/WHQL-signed drivers. Check it with installer\Test-Ssap3Driver.ps1 -Package `"$SignedDriverFolder`"."
+    }
+    if (-not (Test-Ssap3DriverInfIdentity -InfPath $members[1])) {
+        throw 'The signed INF is not the SSAP3 AAP driver (provider, service or hardware IDs differ).'
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $packageRoot 'driver') | Out-Null
     Copy-Item -Path (Join-Path $SignedDriverFolder 'ssap3aap.*') -Destination (Join-Path $packageRoot 'driver') -Force

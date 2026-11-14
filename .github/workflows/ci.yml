@@ -148,6 +148,22 @@ jobs:
             exit $code
           }
 
+      - name: Signing pipeline checks (unsigned, tampered and spoofed packages; EV-signing helper rehearsal)
+        shell: pwsh
+        run: |
+          # Throwaway certificates live only in this runner's CurrentUser store; no trust store is touched.
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\driver\Test-SigningPipeline.ps1 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          $log | Where-Object { $_ -like 'FAIL*' } | ForEach-Object { Write-Output "::error title=Signing pipeline check::$_" }
+          $summary = (@($log | Where-Object { $_ -match '^(PASS|SKIP)' }) -join ' | ').Replace('%', '%25')
+          Write-Output "::notice title=Signing pipeline results::$summary"
+          if ($code -ne 0 -and -not ($log | Where-Object { $_ -like 'FAIL*' })) {
+            $text = (($log | Select-Object -Last 15) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Signing pipeline test crashed::$text"
+          }
+          exit $code
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ssap3-driver-unsigned
@@ -245,12 +261,22 @@ jobs:
           # Production setup must never weaken the platform (SECURITY_AUDIT.md S-01/S-03).
           $patterns = 'bcdedit\s+/set', 'Suspend-BitLocker', 'certutil.*-addstore', 'Import-Certificate', 'Cert:\\LocalMachine\\Root', 'testsigning\s+on'
           # Test-Ssap3SystemState.ps1 is excluded: it only READS the Root store to detect leftovers.
-          $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1, installer\Install-SSAP3Local.ps1, installer\Uninstall-SSAP3Local.ps1 -Pattern $patterns
+          $hits = Select-String -Path installer\Install-SSAP3.ps1, installer\Uninstall-SSAP3.ps1, installer\Ssap3Setup.psm1, installer\SSAP3.iss, installer\build-installer.ps1, installer\Install-SSAP3Local.ps1, installer\Uninstall-SSAP3Local.ps1, installer\Test-Ssap3Driver.ps1, driver\Sign-AttestationCab.ps1, driver\Test-SigningPipeline.ps1 -Pattern $patterns
           if ($hits) { $hits | ForEach-Object { Write-Output "::error file=$($_.Path),line=$($_.LineNumber)::$($_.Line.Trim())" }; exit 1 }
 
       - name: System-state verifier runs read-only on a clean runner
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\Test-Ssap3SystemState.ps1 -Verify
+
+      - name: Driver health check runs read-only on a clean runner (no driver installed, no failures)
+        shell: powershell
+        run: |
+          $log = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\Test-Ssap3Driver.ps1 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $log | ForEach-Object { Write-Output $_ }
+          $log | Where-Object { $_ -like 'FAIL*' } | ForEach-Object { Write-Output "::error title=Driver health check::$_" }
+          if (-not ($log | Where-Object { $_ -match 'Installed driver reached: NotInstalled' })) { Write-Output '::error title=Driver health check::unexpected level on a clean runner'; exit 1 }
+          exit $code
 
   codeql:
     name: CodeQL (${{ matrix.language }})

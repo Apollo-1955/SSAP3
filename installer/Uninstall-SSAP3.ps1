@@ -64,6 +64,9 @@ try {
     else {
         Remove-Item -LiteralPath $ManifestPath -Force -ErrorAction SilentlyContinue
         Write-Ssap3Log 'SSAP3 uninstall completed. Run installer\Test-Ssap3SystemState.ps1 -Verify to confirm.'
+        if (Test-Ssap3RestartRequired) {
+            Write-Ssap3Log 'RESTART NEEDED: restart Windows to finish removing the SSAP3 driver.'
+        }
         Remove-Item -LiteralPath (Join-Path $SetupRoot 'install.log') -Force -ErrorAction SilentlyContinue
     }
 }

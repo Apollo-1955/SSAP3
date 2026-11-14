@@ -10,9 +10,14 @@
  * may be up to the L2CAP receive MTU iOS uses (2582): AirPods only announce
  * the sensor services whose descriptors fit the receiver's MTU, so a small MTU
  * hides head tracking. Outbound packets stay capped at 512 bytes.
+ * Version 4 makes the I/O manager check the handle's access for each IOCTL:
+ * status and read need FILE_READ_ACCESS; open, close and send need
+ * FILE_WRITE_ACCESS. The device SDDL grants read and write only to
+ * interactive users, SYSTEM and Administrators, so a read-only handle (for
+ * example from a low-integrity process) can no longer drive the AirPods.
  *
  * Every structure is validated by size in the driver; all IOCTLs are
- * METHOD_BUFFERED and FILE_ANY_ACCESS (access is enforced by the device SDDL).
+ * METHOD_BUFFERED.
  */
 #ifndef SSAP3_DRIVER_PROTOCOL_H
 #define SSAP3_DRIVER_PROTOCOL_H
@@ -25,8 +30,12 @@ typedef unsigned __int64 ssap3_u64;
 #define FILE_DEVICE_UNKNOWN 0x00000022u
 #endif
 
-#ifndef FILE_ANY_ACCESS
-#define FILE_ANY_ACCESS 0u
+#ifndef FILE_READ_ACCESS
+#define FILE_READ_ACCESS 0x0001u
+#endif
+
+#ifndef FILE_WRITE_ACCESS
+#define FILE_WRITE_ACCESS 0x0002u
 #endif
 
 #ifndef METHOD_BUFFERED
@@ -38,7 +47,7 @@ typedef unsigned __int64 ssap3_u64;
     ((((device_type) << 16) | ((access) << 14) | ((function) << 2) | (method)))
 #endif
 
-#define SSAP3_DRIVER_PROTOCOL_VERSION 3u
+#define SSAP3_DRIVER_PROTOCOL_VERSION 4u
 #define SSAP3_DRIVER_INTERFACE_GUID_STRING L"{1C3A8128-3668-4428-95A4-B1CAD51B7249}"
 #define SSAP3_DRIVER_MAX_BLUETOOTH_ADDRESS_LENGTH 18u
 #define SSAP3_DRIVER_MAX_OUTBOUND_PACKET_LENGTH 512u
@@ -46,16 +55,18 @@ typedef unsigned __int64 ssap3_u64;
 #define SSAP3_DRIVER_MAX_SESSIONS_PER_HANDLE 1u
 #define SSAP3_DRIVER_MAX_SESSIONS_PER_DEVICE 4u
 
+/* Codes as the client sees them: 0x00226000, 0x0022A004, 0x0022A008,
+ * 0x0022A00C, 0x00226010 (checked below). */
 #define SSAP3_IOCTL_GET_BRIDGE_STATUS \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define SSAP3_IOCTL_OPEN_AACP_CHANNEL \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define SSAP3_IOCTL_CLOSE_AACP_CHANNEL \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define SSAP3_IOCTL_SEND_AACP_PACKET \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define SSAP3_IOCTL_READ_AACP_PACKET \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 enum ssap3_driver_capability_flags {
     SSAP3_DRIVER_CAPABILITY_NONE = 0,
@@ -145,5 +156,13 @@ typedef char ssap3_check_status_size[(sizeof(ssap3_driver_status) == 40u) ? 1 : 
 typedef char ssap3_check_send_request_size[(sizeof(ssap3_driver_send_packet_request) == 536u) ? 1 : -1];
 typedef char ssap3_check_read_request_size[(sizeof(ssap3_driver_read_packet_request) == 24u) ? 1 : -1];
 typedef char ssap3_check_read_response_size[(sizeof(ssap3_driver_read_packet_response) == 2600u) ? 1 : -1];
+typedef char ssap3_check_open_request_size[(sizeof(ssap3_driver_open_session_request) == 24u) ? 1 : -1];
+typedef char ssap3_check_open_response_size[(sizeof(ssap3_driver_open_session_response) == 24u) ? 1 : -1];
+typedef char ssap3_check_close_request_size[(sizeof(ssap3_driver_close_session_request) == 16u) ? 1 : -1];
+typedef char ssap3_check_ioctl_codes[(SSAP3_IOCTL_GET_BRIDGE_STATUS == 0x00226000u &&
+                                      SSAP3_IOCTL_OPEN_AACP_CHANNEL == 0x0022A004u &&
+                                      SSAP3_IOCTL_CLOSE_AACP_CHANNEL == 0x0022A008u &&
+                                      SSAP3_IOCTL_SEND_AACP_PACKET == 0x0022A00Cu &&
+                                      SSAP3_IOCTL_READ_AACP_PACKET == 0x00226010u) ? 1 : -1];
 
 #endif

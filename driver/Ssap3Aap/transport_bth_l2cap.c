@@ -141,12 +141,21 @@ Ssap3MapNtStatusToDriverError(
     }
 }
 
+/*
+ * IgnoreTargetState: close-channel requests are also sent from
+ * EvtDeviceReleaseHardware and file cleanup, when KMDF may already have
+ * stopped the default I/O target; without this option such a request would
+ * wait in the stopped target until its timeout and never reach the Bluetooth
+ * stack, leaking the channel. The lower stack is still present at that point.
+ */
+_IRQL_requires_(PASSIVE_LEVEL)
 static
 NTSTATUS
 Ssap3SubmitBrbSynchronously(
     _In_ WDFDEVICE Device,
     _Inout_ PBRB Brb,
-    _In_ ULONG TimeoutMilliseconds
+    _In_ ULONG TimeoutMilliseconds,
+    _In_ BOOLEAN IgnoreTargetState
     )
 {
     WDFIOTARGET ioTarget;
@@ -162,7 +171,11 @@ Ssap3SubmitBrbSynchronously(
 
     bytesReturned = 0;
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&otherArg1, Brb, Brb->BrbHeader.Length);
-    WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WDF_REQUEST_SEND_OPTIONS_INIT(
+        &sendOptions,
+        IgnoreTargetState
+            ? (WDF_REQUEST_SEND_OPTION_TIMEOUT | WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE)
+            : WDF_REQUEST_SEND_OPTION_TIMEOUT);
     WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_MS(TimeoutMilliseconds));
 
     status = WdfIoTargetSendInternalIoctlOthersSynchronously(
@@ -273,6 +286,7 @@ Ssap3FormatContinuousRead(
  * side sees the other. A stopper that cancels before WdfRequestSend is
  * covered by the post-send re-check below, which cancels the read itself.
  */
+_IRQL_requires_max_(DISPATCH_LEVEL)
 static
 NTSTATUS
 Ssap3SubmitContinuousRead(
@@ -627,7 +641,7 @@ Ssap3TransportOpenSession(
     brb.BrbL2caOpenChannel.BtAddress = Session->RemoteAddress;
     Ssap3PopulateDefaultOpenConfig(&brb.BrbL2caOpenChannel);
 
-    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_OPEN_CHANNEL_TIMEOUT_MS);
+    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_OPEN_CHANNEL_TIMEOUT_MS, FALSE);
     if (!NT_SUCCESS(status)) {
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
@@ -648,7 +662,7 @@ Ssap3TransportOpenSession(
         deviceContext->ProfileDriverInterface.BthInitializeBrb(&closeBrb, BRB_L2CA_CLOSE_CHANNEL);
         closeBrb.BrbL2caCloseChannel.BtAddress = Session->RemoteAddress;
         closeBrb.BrbL2caCloseChannel.ChannelHandle = Session->ChannelHandle;
-        (VOID)Ssap3SubmitBrbSynchronously(Device, &closeBrb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS);
+        (VOID)Ssap3SubmitBrbSynchronously(Device, &closeBrb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS, TRUE);
         Session->ChannelHandle = NULL;
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
@@ -692,7 +706,7 @@ Ssap3TransportCloseSession(
         deviceContext->ProfileDriverInterface.BthInitializeBrb(&brb, BRB_L2CA_CLOSE_CHANNEL);
         brb.BrbL2caCloseChannel.BtAddress = Session->RemoteAddress;
         brb.BrbL2caCloseChannel.ChannelHandle = Session->ChannelHandle;
-        status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS);
+        status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_CLOSE_CHANNEL_TIMEOUT_MS, TRUE);
         if (!NT_SUCCESS(status)) {
             *DriverError = Ssap3MapNtStatusToDriverError(status);
         }
@@ -749,7 +763,7 @@ Ssap3TransportSendPacket(
     brb.BrbL2caAclTransfer.BufferMDL = NULL;
     brb.BrbL2caAclTransfer.Timeout = 0;
 
-    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_SEND_PACKET_TIMEOUT_MS);
+    status = Ssap3SubmitBrbSynchronously(Device, &brb, SSAP3_SEND_PACKET_TIMEOUT_MS, FALSE);
     if (!NT_SUCCESS(status)) {
         *DriverError = Ssap3MapNtStatusToDriverError(status);
         return status;
@@ -895,6 +909,30 @@ Ssap3IsAllowedSensorSettingPacket(
     return interval == 0u || (interval >= 5000u && interval <= 1000000u);
 }
 
+/*
+ * The exact fixed packets SSAP3 sends (src/SSAP3.Core/AacpPacketFactory.cs);
+ * a C# mirror of this whole rule is unit-tested against every packet the app
+ * can emit (tests/SSAP3.Core.Tests/SensorDataWxTests.cs, DriverAllowlistMirror).
+ */
+static const UCHAR Ssap3HandshakePacket[16] = {
+    0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const UCHAR Ssap3FeatureFlagsPacket[14] = {
+    0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xD7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const UCHAR Ssap3NotificationRequestPacket[11] = {
+    0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+static
+BOOLEAN
+Ssap3PacketEquals(
+    _In_reads_bytes_(PacketLength) const UCHAR* Packet,
+    _In_ ULONG PacketLength,
+    _In_reads_bytes_(ExpectedLength) const UCHAR* Expected,
+    _In_ ULONG ExpectedLength
+    )
+{
+    return PacketLength == ExpectedLength && RtlCompareMemory(Packet, Expected, ExpectedLength) == ExpectedLength;
+}
+
 _Use_decl_annotations_
 BOOLEAN
 Ssap3IsAllowedOutboundPacket(
@@ -908,9 +946,9 @@ Ssap3IsAllowedOutboundPacket(
         return FALSE;
     }
 
-    /* Session handshake: 00 00 04 00 01 00 ... */
-    if (Packet[0] == 0x00 && Packet[1] == 0x00 && Packet[2] == 0x04 && Packet[3] == 0x00) {
-        return Packet[4] == 0x01 && Packet[5] == 0x00;
+    /* Session handshake: exactly 00 00 04 00 01 00 02 00 followed by 8 zero bytes. */
+    if (Packet[0] == 0x00) {
+        return Ssap3PacketEquals(Packet, PacketLength, Ssap3HandshakePacket, (ULONG)sizeof(Ssap3HandshakePacket));
     }
 
     if (Packet[0] != 0x04 || Packet[1] != 0x00 || Packet[2] != 0x04 || Packet[3] != 0x00) {
@@ -920,16 +958,30 @@ Ssap3IsAllowedOutboundPacket(
     opcode = (USHORT)(Packet[4] | (Packet[5] << 8));
     switch (opcode) {
         case 0x0009:
-            /* Control commands: owns-connection, listening mode, conversational awareness. */
-            return PacketLength >= 7 &&
-                (Packet[6] == 0x06 || Packet[6] == 0x0D || Packet[6] == 0x28);
+            /* Control command: 04 00 04 00 09 00 <id> <value> 00 00 00, with
+             * only the identifiers and values SSAP3 uses. */
+            if (PacketLength != 11 || Packet[8] != 0x00 || Packet[9] != 0x00 || Packet[10] != 0x00) {
+                return FALSE;
+            }
+            switch (Packet[6]) {
+                case 0x06: /* owns connection: off/on */
+                    return Packet[7] <= 0x01;
+                case 0x0D: /* listening mode: off, noise cancellation, transparency, adaptive */
+                    return Packet[7] >= 0x01 && Packet[7] <= 0x04;
+                case 0x28: /* conversation awareness: on/off */
+                    return Packet[7] == 0x01 || Packet[7] == 0x02;
+                default:
+                    return FALSE;
+            }
 
         case 0x0017: /* sensor stream start/stop only */
             return Ssap3IsAllowedSensorSettingPacket(Packet, PacketLength);
 
-        case 0x000F: /* notification request */
-        case 0x004D: /* feature flags */
-            return TRUE;
+        case 0x000F: /* notification request, exactly */
+            return Ssap3PacketEquals(Packet, PacketLength, Ssap3NotificationRequestPacket, (ULONG)sizeof(Ssap3NotificationRequestPacket));
+
+        case 0x004D: /* feature flags, exactly */
+            return Ssap3PacketEquals(Packet, PacketLength, Ssap3FeatureFlagsPacket, (ULONG)sizeof(Ssap3FeatureFlagsPacket));
 
         default:
             return FALSE;

@@ -9,6 +9,8 @@ Ssap3TransportQueryStatus(
     _Out_ ULONG* DriverError
     );
 
+/* Open, close and send block on synchronous BRBs: PASSIVE_LEVEL only. */
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 Ssap3TransportOpenSession(
     _In_ WDFDEVICE Device,
@@ -22,6 +24,7 @@ Ssap3TransportOpenSession(
  * Stops the reader and closes the L2CAP channel with bounded waits.
  * *CanFree is TRUE only when no read can still complete into the session.
  */
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 Ssap3TransportCloseSession(
     _In_ WDFDEVICE Device,
@@ -30,6 +33,7 @@ Ssap3TransportCloseSession(
     _Out_ ULONG* DriverError
     );
 
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 Ssap3TransportSendPacket(
     _In_ WDFDEVICE Device,

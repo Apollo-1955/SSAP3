@@ -23,6 +23,10 @@
 #define SSAP3_SEND_PACKET_TIMEOUT_MS 2000
 #define SSAP3_READER_STOP_TIMEOUT_MS 3000
 
+/* At most this many parked sessions (each about 41 KB of NonPagedPoolNx)
+ * before OPEN is refused until the device is removed (S-05). */
+#define SSAP3_MAX_ZOMBIE_SESSIONS 4u
+
 #define SSAP3_INIT_FLAG_PROFILE_INTERFACE 0x00000001u
 #define SSAP3_INIT_FLAG_REMOTE_DEVICE_INFO 0x00000002u
 #define SSAP3_INIT_FLAG_ENUMERATOR_INFO 0x00000004u
@@ -68,6 +72,7 @@ typedef struct _SSAP3_DEVICE_CONTEXT {
     LIST_ENTRY Sessions;
     /* Sessions whose reader could not be confirmed stopped; freed at device cleanup. */
     LIST_ENTRY ZombieSessions;
+    ULONG ZombieCount;
     ULONG SessionCount;
     UINT64 NextSessionId;
     BOOLEAN HasProfileDriverInterface;
@@ -116,6 +121,7 @@ Ssap3FindSessionLocked(
  * then frees it, or parks it on the zombie list if its reader could not be
  * confirmed stopped. Caller holds SessionLock. Runs at PASSIVE_LEVEL.
  */
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 Ssap3DestroySessionLocked(
     _In_ WDFDEVICE Device,

@@ -25,13 +25,15 @@ public enum DriverConnectOutcome
 }
 
 /// <summary>
-/// User-mode client for the SSAP3 AAP transport driver (protocol v3,
+/// User-mode client for the SSAP3 AAP transport driver (protocol v4,
 /// driver/shared/ssap3_driver_protocol.h). One instance owns exactly one
-/// handle and one session; dispose it to close both.
+/// handle and one session; dispose it to close both. The handle is opened for
+/// read and write: v4 IOCTLs require FILE_READ_ACCESS (status, read) or
+/// FILE_WRITE_ACCESS (open, close, send).
 /// </summary>
 public sealed class Ssap3DriverAacpClient : IDisposable
 {
-    public const uint ProtocolVersion = 3;
+    public const uint ProtocolVersion = 4;
 
     /// <summary>Largest packet SSAP3 sends (the driver enforces the same cap).</summary>
     public const int MaxOutboundPacketLength = 512;
@@ -56,11 +58,13 @@ public sealed class Ssap3DriverAacpClient : IDisposable
     // 16 + 2582 = 2598, padded by the C compiler to a multiple of 8 (the driver
     // header checks sizeof == 2600 at compile time).
     private const int ReadResponseSize = (16 + MaxInboundPacketLength + 7) & ~7;
-    private const uint IoctlGetBridgeStatus = 0x00222000;
-    private const uint IoctlOpenAacpChannel = 0x00222004;
-    private const uint IoctlCloseAacpChannel = 0x00222008;
-    private const uint IoctlSendAacpPacket = 0x0022200C;
-    private const uint IoctlReadAacpPacket = 0x00222010;
+    // CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800 + n, METHOD_BUFFERED, access); the
+    // driver header checks these exact values at compile time.
+    private const uint IoctlGetBridgeStatus = 0x00226000;  // FILE_READ_ACCESS
+    private const uint IoctlOpenAacpChannel = 0x0022A004;  // FILE_WRITE_ACCESS
+    private const uint IoctlCloseAacpChannel = 0x0022A008; // FILE_WRITE_ACCESS
+    private const uint IoctlSendAacpPacket = 0x0022A00C;   // FILE_WRITE_ACCESS
+    private const uint IoctlReadAacpPacket = 0x00226010;   // FILE_READ_ACCESS
 
     /// <summary>{1C3A8128-3668-4428-95A4-B1CAD51B7249}: must match the INF and driver.c.</summary>
     public static readonly Guid DriverInterfaceGuid = new("1C3A8128-3668-4428-95A4-B1CAD51B7249");

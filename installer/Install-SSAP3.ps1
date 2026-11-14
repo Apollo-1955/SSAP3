@@ -77,6 +77,9 @@ try {
     }
 
     Write-Ssap3Log 'SSAP3 system configuration completed.'
+    if (Test-Ssap3RestartRequired) {
+        Write-Ssap3Log 'RESTART NEEDED: restart Windows to finish installing the SSAP3 driver.'
+    }
 }
 catch {
     $exitCode = 1

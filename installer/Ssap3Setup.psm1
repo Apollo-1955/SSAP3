@@ -302,14 +302,202 @@ function Stop-Ssap3Processes {
 
 # ---------------------------------------------------------------- driver --
 
-# Production rule: the catalog must chain to Microsoft's hardware publisher
-# (attestation or WHQL). Locally signed or unsigned packages are never installed.
-function Test-Ssap3DriverProductionSigned {
+# Microsoft's driver-publisher signature, as observed on real WHQL and
+# attestation-signed catalogs (driver/SIGNING.md, "How a Microsoft signature
+# is recognised"): signer "Microsoft Windows Hardware Compatibility Publisher",
+# chain to one of these Microsoft roots, and the Windows Hardware Driver
+# Verification EKU. Attestation signing adds the "attested" EKU.
+$script:MicrosoftDriverRoots = @(
+    '3B1EFD3A66EA28B16697394703A72CA340A05BD5', # Microsoft Root Certificate Authority 2010
+    'CDD4EEAE6000AC7F40C3802C171E30148030C072', # Microsoft Root Certificate Authority
+    'A43489159A520F0D93D032CCAF37E7FE20A8B419'  # Microsoft Root Authority
+)
+$script:DriverVerificationEku = '1.3.6.1.4.1.311.10.3.5'
+$script:AttestedVerificationEku = '1.3.6.1.4.1.311.10.3.5.1'
+
+# Classifies a driver catalog's signature without trusting names alone:
+#   Unsigned             - no signature
+#   NotTrusted           - signed, but Windows does not trust it (for example a
+#                          self-signed or WDK test certificate)
+#   NotMicrosoft         - trusted, but not by Microsoft's driver publisher
+#                          (a third-party CA, or a test root someone trusted)
+#   MicrosoftOther       - a Microsoft signature that is not a driver-publisher one
+#   MicrosoftWhql        - Microsoft hardware signature (WHQL/HLK)
+#   MicrosoftAttestation - Microsoft attestation signature
+# Trust, time validity (with the timestamp) and revocation are Windows' own
+# verdict (Get-AuthenticodeSignature); the chain is built here only to find
+# its root, using the certificates embedded in the catalog.
+function Get-Ssap3CatalogSignature {
     param([Parameter(Mandatory = $true)][string]$CatalogPath)
-    if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf)) { return $false }
+    $result = [ordered]@{ Kind = 'Unsigned'; Status = 'Missing'; Signer = $null; Root = $null; RootThumbprint = $null; Ekus = @(); Detail = $null }
+    if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf)) {
+        $result.Detail = 'The catalog file is missing.'
+        return [pscustomobject]$result
+    }
+
     $signature = Get-AuthenticodeSignature -LiteralPath $CatalogPath
-    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { return $false }
-    return $signature.SignerCertificate.Subject -match 'CN=Microsoft Windows Hardware Compatibility Publisher'
+    $result.Status = "$($signature.Status)"
+    if ($signature.Status -eq 'NotSigned' -or $null -eq $signature.SignerCertificate) {
+        $result.Detail = 'The catalog has no signature.'
+        return [pscustomobject]$result
+    }
+
+    $signer = $signature.SignerCertificate
+    $result.Signer = $signer.Subject
+    $result.Ekus = @($signer.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } |
+        ForEach-Object { ([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$_).EnhancedKeyUsages } |
+        ForEach-Object Value)
+
+    Add-Type -AssemblyName System.Security
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    try {
+        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+        $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid
+        try {
+            $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
+            $cms.Decode([IO.File]::ReadAllBytes($CatalogPath))
+            [void]$chain.ChainPolicy.ExtraStore.AddRange($cms.Certificates)
+        }
+        catch {
+            $result.Detail = "The catalog's embedded certificates could not be read: $($_.Exception.Message)"
+        }
+
+        [void]$chain.Build($signer)
+        $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+        $result.Root = $root.Subject
+        $result.RootThumbprint = $root.Thumbprint
+    }
+    finally {
+        $chain.Dispose()
+    }
+
+    if ($signature.Status -ne 'Valid') {
+        $result.Kind = 'NotTrusted'
+        $result.Detail = "Windows does not trust this signature ($($signature.Status)): $($signature.StatusMessage)"
+        return [pscustomobject]$result
+    }
+
+    $microsoftRoot = $result.RootThumbprint -in $script:MicrosoftDriverRoots -and $root.Subject -eq $root.Issuer
+    $publisher = $signer.Subject -match '^CN=Microsoft Windows Hardware Compatibility Publisher(,|$)'
+    if (-not $microsoftRoot) {
+        $result.Kind = 'NotMicrosoft'
+        $result.Detail = 'Trusted on this PC, but the chain does not end at a Microsoft root.'
+    }
+    elseif (-not $publisher -or $script:DriverVerificationEku -notin $result.Ekus) {
+        $result.Kind = 'MicrosoftOther'
+        $result.Detail = 'Signed by Microsoft, but not as a driver publisher (no Windows Hardware Driver Verification EKU).'
+    }
+    elseif ($script:AttestedVerificationEku -in $result.Ekus) {
+        $result.Kind = 'MicrosoftAttestation'
+        $result.Detail = 'Microsoft attestation signature.'
+    }
+    else {
+        $result.Kind = 'MicrosoftWhql'
+        $result.Detail = 'Microsoft hardware (WHQL) signature.'
+    }
+
+    return [pscustomobject]$result
+}
+
+# Authenticode image hash of a PE file: the whole file except the checksum
+# field, the certificate-table directory entry and the certificate table.
+# Driver catalogs list binaries by this hash (checked against 67 real
+# Microsoft-signed driver files; a plain file hash matched none).
+function Get-Ssap3PeImageHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateSet('SHA256', 'SHA1')][string]$Algorithm = 'SHA256'
+    )
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x200 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return $null }
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($pe -lt 0x40 -or ($pe + 24 + 112 + 40) -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { return $null }
+    $optional = $pe + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optional)
+    if ($magic -eq 0x20B) { $directories = $optional + 112 } elseif ($magic -eq 0x10B) { $directories = $optional + 96 } else { return $null }
+    $checksum = $optional + 64
+    $certificateEntry = $directories + 32
+    $certificateOffset = [BitConverter]::ToUInt32($bytes, $certificateEntry)
+    $certificateSize = [BitConverter]::ToUInt32($bytes, $certificateEntry + 4)
+    $end = $bytes.Length
+    if ($certificateSize -gt 0 -and $certificateOffset -gt $certificateEntry -and ($certificateOffset + $certificateSize) -le $bytes.Length) {
+        $end = [int]$certificateOffset
+    }
+
+    $hash = [System.Security.Cryptography.HashAlgorithm]::Create($Algorithm)
+    try {
+        [void]$hash.TransformBlock($bytes, 0, $checksum, $null, 0)
+        [void]$hash.TransformBlock($bytes, $checksum + 4, $certificateEntry - ($checksum + 4), $null, 0)
+        [void]$hash.TransformFinalBlock($bytes, $certificateEntry + 8, $end - ($certificateEntry + 8))
+        return $hash.Hash
+    }
+    finally {
+        $hash.Dispose()
+    }
+}
+
+# True when the catalog lists the file: by its Authenticode image hash for PE
+# files, by its plain hash otherwise (INF). SHA-256 or SHA-1 (older catalogs).
+function Test-Ssap3CatalogMember {
+    param(
+        [Parameter(Mandatory = $true)][string]$CatalogPath,
+        [Parameter(Mandatory = $true)][string]$FilePath
+    )
+    if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf) -or -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { return $false }
+    $catalog = [BitConverter]::ToString([IO.File]::ReadAllBytes($CatalogPath)).Replace('-', '')
+    foreach ($algorithm in 'SHA256', 'SHA1') {
+        $digest = Get-Ssap3PeImageHash -Path $FilePath -Algorithm $algorithm
+        if ($null -eq $digest) {
+            $engine = [System.Security.Cryptography.HashAlgorithm]::Create($algorithm)
+            try { $digest = $engine.ComputeHash([IO.File]::ReadAllBytes($FilePath)) } finally { $engine.Dispose() }
+        }
+
+        $needle = [BitConverter]::ToString($digest).Replace('-', '')
+        $index = $catalog.IndexOf($needle, [StringComparison]::Ordinal)
+        while ($index -ge 0 -and ($index % 2) -ne 0) { $index = $catalog.IndexOf($needle, $index + 1, [StringComparison]::Ordinal) }
+        if ($index -ge 0) { return $true }
+    }
+
+    return $false
+}
+
+# The INF must be SSAP3's own: provider SSAP3, catalog ssap3aap.cat, service
+# ssap3aap, and models that bind only to the Apple AAP and UARP Bluetooth
+# service PDOs. Together with the catalog check this stops a different
+# (even Microsoft-signed) driver package renamed to ssap3aap.* from being
+# installed.
+$script:Ssap3HardwareIdPrefixes = @(
+    'BTHENUM\{74ec2172-0bad-4d01-8f77-997b2be0722a}', # Apple AAP service
+    'BTHENUM\{4715650b-5e9d-4ac2-b898-a4fc0aa5df78}'  # Apple UARP service (fallback parent)
+)
+function Test-Ssap3DriverInfIdentity {
+    param([Parameter(Mandatory = $true)][string]$InfPath)
+    if (-not (Test-Path -LiteralPath $InfPath -PathType Leaf)) { return $false }
+    $lines = @(Get-Content -LiteralPath $InfPath | ForEach-Object { ($_ -replace ';.*$', '').Trim() } | Where-Object { $_ })
+    $provider = [bool]($lines | Where-Object { $_ -match '^ProviderName\s*=\s*"?SSAP3"?$' })
+    $catalog = [bool]($lines | Where-Object { $_ -match '^CatalogFile\s*=\s*ssap3aap\.cat$' })
+    $services = @($lines | Where-Object { $_ -match '^AddService\s*=' } | ForEach-Object { ($_ -replace '^AddService\s*=\s*', '' -split ',')[0].Trim() })
+    $ids = @($lines | Where-Object { $_ -match '^%\w+%\s*=\s*SSAP3_Profile_Install\s*,' } | ForEach-Object { ($_ -split ',', 2)[1].Trim() })
+    $foreign = @($ids | Where-Object { $id = $_; -not ($script:Ssap3HardwareIdPrefixes | Where-Object { $id.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) })
+    $otherModels = @($lines | Where-Object { $_ -match '^%\w+%\s*=\s*\w+\s*,\s*\S' -and $_ -notmatch 'SSAP3_Profile_Install' -and $_ -notmatch '^%ProviderName%\s*=\s*Standard\s*,' })
+    return $provider -and $catalog -and ($services.Count -ge 1) -and -not ($services | Where-Object { $_ -ne 'ssap3aap' }) -and
+        $ids.Count -ge 1 -and $foreign.Count -eq 0 -and $otherModels.Count -eq 0
+}
+
+# Production rule: the catalog must carry Microsoft's driver-publisher signature
+# (attestation or WHQL, chain pinned to a Microsoft root) and list the driver
+# binary and INF being installed. Anything else is never installed.
+function Test-Ssap3DriverProductionSigned {
+    param(
+        [Parameter(Mandatory = $true)][string]$CatalogPath,
+        [string[]]$MemberPaths = @()
+    )
+    $signature = Get-Ssap3CatalogSignature -CatalogPath $CatalogPath
+    if ($signature.Kind -notin 'MicrosoftAttestation', 'MicrosoftWhql') { return $false }
+    foreach ($member in $MemberPaths) {
+        if (-not (Test-Ssap3CatalogMember -CatalogPath $CatalogPath -FilePath $member)) { return $false }
+    }
+    return $true
 }
 
 function Get-Ssap3DriverPackages {
@@ -329,17 +517,36 @@ function Get-Ssap3DriverPackages {
     return $packages
 }
 
+# pnputil exits with 3010 when Windows needs a restart to finish adding or
+# removing a driver (for example while a device still uses it).
+$script:RestartRequired = $false
+function Register-Ssap3PnpResult {
+    if ($LASTEXITCODE -eq 3010) {
+        $script:RestartRequired = $true
+        Write-Ssap3Log 'Windows reports that a restart is needed to finish this driver change.'
+    }
+}
+
+function Test-Ssap3RestartRequired { return $script:RestartRequired }
+
 function Install-Ssap3Driver {
     param([Parameter(Mandatory = $true)][string]$PackageRoot)
     $inf = Join-Path $PackageRoot 'driver\ssap3aap.inf'
     $cat = Join-Path $PackageRoot 'driver\ssap3aap.cat'
-    if (-not (Test-Ssap3DriverProductionSigned -CatalogPath $cat)) {
-        Write-Ssap3Log 'AAP driver skipped: the package is not signed by Microsoft (attestation/WHQL). Listening modes and head tracking stay unavailable; nothing was changed.'
+    $sys = Join-Path $PackageRoot 'driver\ssap3aap.sys'
+    if (-not (Test-Ssap3DriverProductionSigned -CatalogPath $cat -MemberPaths @($sys, $inf))) {
+        $signature = Get-Ssap3CatalogSignature -CatalogPath $cat
+        Write-Ssap3Log "AAP driver skipped: the package is not Microsoft-signed for this driver (catalog: $($signature.Kind)). Listening modes and head tracking stay unavailable; nothing was changed."
+        return $false
+    }
+    if (-not (Test-Ssap3DriverInfIdentity -InfPath $inf)) {
+        Write-Ssap3Log 'AAP driver skipped: the signed INF is not the SSAP3 AAP driver (provider, service or hardware IDs differ). Nothing was changed.'
         return $false
     }
     $before = @(Get-Ssap3DriverPackages | ForEach-Object Published)
     $step = Add-Ssap3Step -Type 'DriverPackage' -Data @{ originalName = 'ssap3aap.inf'; provider = 'SSAP3'; preexisting = $before }
     Invoke-Ssap3Native -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -Arguments @('/add-driver', $inf, '/install') -AllowedExitCodes @(0, 259, 3010) | Out-Null
+    Register-Ssap3PnpResult
     $step.data | Add-Member -NotePropertyName published -NotePropertyValue @(Get-Ssap3DriverPackages | ForEach-Object Published | Where-Object { $_ -notin $before }) -Force
     Complete-Ssap3Step $step
     return $true
@@ -348,6 +555,7 @@ function Install-Ssap3Driver {
 function Remove-Ssap3DriverPackages {
     foreach ($package in Get-Ssap3DriverPackages) {
         Invoke-Ssap3Native -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -Arguments @('/delete-driver', $package.Published, '/uninstall') -AllowedExitCodes @(0, 3010) | Out-Null
+        Register-Ssap3PnpResult
     }
 }
 
@@ -786,6 +994,7 @@ function Undo-Ssap3Step {
             foreach ($package in Get-Ssap3DriverPackages) {
                 if ($package.Published -notin @($d.preexisting)) {
                     Invoke-Ssap3Native -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -Arguments @('/delete-driver', $package.Published, '/uninstall') -AllowedExitCodes @(0, 3010) | Out-Null
+                    Register-Ssap3PnpResult
                 }
             }
         }

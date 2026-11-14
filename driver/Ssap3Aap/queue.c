@@ -119,9 +119,12 @@ Ssap3HandleOpenSession(
         return STATUS_FILE_CLOSED;
     }
 
-    /* S-05: bounded sessions per handle and per device. */
+    /* S-05: bounded sessions per handle and per device, and bounded parked
+     * (zombie) sessions, so a Bluetooth stack that ignores cancels cannot make
+     * repeated open/close cycles exhaust non-paged pool. */
     if (fileContext->SessionCount >= SSAP3_DRIVER_MAX_SESSIONS_PER_HANDLE ||
-        deviceContext->SessionCount >= SSAP3_DRIVER_MAX_SESSIONS_PER_DEVICE) {
+        deviceContext->SessionCount >= SSAP3_DRIVER_MAX_SESSIONS_PER_DEVICE ||
+        deviceContext->ZombieCount >= SSAP3_MAX_ZOMBIE_SESSIONS) {
         WdfWaitLockRelease(deviceContext->SessionLock);
         ExFreePoolWithTag(session, SSAP3_SESSION_POOL_TAG);
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_SESSION_LIMIT);
@@ -190,12 +193,11 @@ Ssap3HandleCloseSession(
     }
 
     RemoveEntryList(&session->ListEntry);
-    status = Ssap3DestroySessionLocked(Device, session);
+    /* The session is destroyed and its slot freed even when the close-channel
+     * request fails (that error stays in LastError), so report success: a
+     * client must not believe the session is still open and retry. */
+    (VOID)Ssap3DestroySessionLocked(Device, session);
     WdfWaitLockRelease(deviceContext->SessionLock);
-
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
 
     Ssap3CompleteRequest(Request, STATUS_SUCCESS, 0);
     return STATUS_SUCCESS;
@@ -297,10 +299,11 @@ Ssap3HandleReadPacket(
         return status;
     }
 
+    /* The buffer must hold the largest inbound packet, so a long packet can
+     * never sit at the head of the queue, unreadable by a small buffer. */
     if (input->struct_size < sizeof(*input) ||
         input->session_id == 0 ||
-        input->packet_buffer_length == 0 ||
-        input->packet_buffer_length > SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
+        input->packet_buffer_length != SSAP3_DRIVER_MAX_INBOUND_PACKET_LENGTH) {
         Ssap3SetLastError(Device, SSAP3_DRIVER_ERROR_INVALID_ARGUMENT);
         return STATUS_INVALID_PARAMETER;
     }

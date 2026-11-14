@@ -111,11 +111,48 @@ internal static class SensorPackets
 }
 
 /// <summary>
-/// C# mirror of the driver's outbound rule for opcode 0x17
-/// (Ssap3IsAllowedSensorSettingPacket in transport_bth_l2cap.c).
+/// C# mirror of the driver's outbound rules (Ssap3IsAllowedOutboundPacket and
+/// Ssap3IsAllowedSensorSettingPacket in transport_bth_l2cap.c).
 /// </summary>
 internal static class DriverAllowlistMirror
 {
+    private static readonly byte[] Handshake = Convert.FromHexString("00000400010002000000000000000000");
+    private static readonly byte[] FeatureFlags = Convert.FromHexString("040004004D00D700000000000000");
+    private static readonly byte[] NotificationRequest = Convert.FromHexString("040004000F00FFFFFFFFFF");
+
+    public static bool IsAllowedOutbound(ReadOnlySpan<byte> p)
+    {
+        if (p.Length < 6 || p.Length > 512)
+        {
+            return false;
+        }
+
+        if (p[0] == 0x00)
+        {
+            return p.SequenceEqual(Handshake);
+        }
+
+        if (p[0] != 4 || p[1] != 0 || p[2] != 4 || p[3] != 0)
+        {
+            return false;
+        }
+
+        return (p[4] | (p[5] << 8)) switch
+        {
+            0x0009 => p.Length == 11 && p[8] == 0 && p[9] == 0 && p[10] == 0 && p[6] switch
+            {
+                0x06 => p[7] <= 1,
+                0x0D => p[7] is >= 1 and <= 4,
+                0x28 => p[7] is 1 or 2,
+                _ => false,
+            },
+            0x0017 => IsAllowedSensorSetting(p),
+            0x000F => p.SequenceEqual(NotificationRequest),
+            0x004D => p.SequenceEqual(FeatureFlags),
+            _ => false,
+        };
+    }
+
     public static bool IsAllowedSensorSetting(ReadOnlySpan<byte> p)
     {
         if (p.Length < 12 || p.Length > 512 || p[0] != 4 || p[1] != 0 || p[2] != 4 || p[3] != 0 || p[4] != 0x17 || p[5] != 0)
@@ -561,5 +598,42 @@ public class MotionStreamControllerTests
         Assert.Equal((ulong)SensorDataWx.MaximumRequestId, first.RequestId);
         Assert.True(SensorDataWx.TryParse(commands[1], out var second));
         Assert.Equal(1UL, second.RequestId);
+    }
+
+    [Fact]
+    public void Every_packet_the_app_sends_passes_the_exact_driver_allowlist()
+    {
+        var packets = new List<byte[]>
+        {
+            AacpPacketFactory.CreateHandshake(),
+            AacpPacketFactory.CreateFeatureFlags(),
+            AacpPacketFactory.CreateNotificationRequest(),
+            AacpPacketFactory.CreateOwnsConnection(true),
+            AacpPacketFactory.CreateOwnsConnection(false),
+            AacpPacketFactory.CreateConversationAwareness(true),
+            AacpPacketFactory.CreateConversationAwareness(false),
+        };
+        packets.AddRange(Enum.GetValues<NoiseControlMode>().Select(AacpPacketFactory.CreateNoiseControl));
+        packets.AddRange(new MotionStreamController().Start(TimeSpan.Zero));
+
+        Assert.All(packets, packet => Assert.True(DriverAllowlistMirror.IsAllowedOutbound(packet), Convert.ToHexString(packet)));
+    }
+
+    [Theory]
+    [InlineData("0000040001000200000000000000000000")] // handshake with a trailing byte
+    [InlineData("00000400010002000000000000000001")]   // handshake with a changed byte
+    [InlineData("040004004D00FF00000000000000")]       // other feature flags
+    [InlineData("040004000F00FFFFFFFFFF00")]           // notification request with a trailing byte
+    [InlineData("0400040009000602000000")]             // owns connection, value 2
+    [InlineData("040004000900060100000000")]           // control command with a trailing byte
+    [InlineData("0400040009000601000001")]             // control command, non-zero tail
+    [InlineData("0400040009000D00000000")]             // listening mode 0 (not a mode)
+    [InlineData("0400040009000D05000000")]             // listening mode 5
+    [InlineData("0400040009002803000000")]             // conversation awareness value 3
+    [InlineData("0400040009000701000000")]             // an unused control identifier
+    [InlineData("040004001000000000000000")]           // an opcode SSAP3 never sends
+    public void Near_misses_are_refused_by_the_driver_allowlist(string hex)
+    {
+        Assert.False(DriverAllowlistMirror.IsAllowedOutbound(Convert.FromHexString(hex)));
     }
 }
