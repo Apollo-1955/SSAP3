@@ -37,8 +37,9 @@ The status legend:
 
 - **Tested (simulated):** passes automated tests without hardware.
 - **Executed:** run for real on this PC.
-- **Hardware-verified:** observed working with AirPods Pro 3. Nothing has
-  reached this state yet.
+- **Hardware-verified:** observed working with AirPods Pro 3. So far only
+  the Fixed-mode soundstage (a subjective listening test) has reached this
+  state.
 
 | Area | Implemented | Tested (simulated) | Executed on this PC | Hardware-verified |
 | --- | --- | --- | --- | --- |
@@ -49,7 +50,7 @@ The status legend:
 | Spatial engine (C++) and its tests | ✓ | ✓ (CI run #4: `/W4 /WX` build, all tests pass) | ✗ (no MSVC locally) | — |
 | Driver (C) | ✓ | compiles, links, passes InfVerif (CI run #4); not loaded or run anywhere | ✗ (no WDK locally) | — |
 | Installer and uninstaller | ✓ | parse-checked; permission hardening and exact restore tested non-elevated on a scratch folder (S-23, S-27) | **Install ✓** (`Install-SSAP3Local.ps1 -EnableSpatialEngine`, 2026-11-13; rollback also exercised by a failed first attempt). Uninstall ✗ not yet run | — |
-| Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; app writes fresh state (≈200 ms old, engine limit 750 ms). **Audible result not yet confirmed** | — |
+| Spatial engine deployed in the Equalizer APO host | ✓ | — | ✓ plug-in installed and scoped to the AirPods endpoint; the app writes fresh state (≈200 ms old, engine limit 750 ms) | **Fixed mode ✓:** the user heard a clear difference between Off and Fixed on AirPods Pro 3 (subjective listening test, 2026-11-13; state record confirmed `Mode=Fixed`). Tracked mode not verified (needs the signed AAP driver) |
 | Package staging (`build-installer.ps1 -StageOnly`) | ✓ | — | ✓ (app published, SBOM written; engine DLL not yet present) | n/a |
 | System-state verifier | ✓ | — | ✓ (`-Verify` pass) | n/a |
 | CI workflow | ✓ | — | ✓ (runs on every push) | n/a |
@@ -76,12 +77,9 @@ The status legend:
 
 ## Next steps
 
-1. Fixed-mode soundstage on this PC (no driver needed):
-   - install Equalizer APO 1.4.2 with its official installer;
-   - unpack the CI engine DLL with `tools/dev/Get-SpatialEngineArtifact.ps1`;
-   - run `build-installer.ps1 -StageOnly`, then `Install-SSAP3Local.ps1
-     -EnableSpatialEngine` elevated;
-   - listen in Fixed mode.
+1. ~~Fixed-mode soundstage on this PC~~ **done 2026-11-13** (user listening
+   test). Still to do: run `Uninstall-SSAP3Local.ps1` and compare with a
+   `Test-Ssap3SystemState.ps1 -Snapshot`.
 2. Load-test the driver on a development PC with Driver Verifier, and
    submit it for attestation signing.
 3. Run the installer and uninstaller on a disposable Windows 11 VM with
